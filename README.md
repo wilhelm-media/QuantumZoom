@@ -76,13 +76,6 @@ DeepSpaceStarter/
 
 ## Collaboration
 
-This is an active production. If you're contributing:
-
-- Work on feature branches, not `main`
-- `main` = current stable state synced with upstream
-- Tag `upstream-sync-2026-04-23` = verified clean upstream baseline
-- Do not modify `Deploy/Switchboard/nDisplay_Deep_Space_8K.ndisplay` without coordination
-
 Contact: [wilhelm-media](https://github.com/wilhelm-media)
 
 ---
@@ -91,6 +84,7 @@ Contact: [wilhelm-media](https://github.com/wilhelm-media)
 
 Base template by [Ars Electronica Futurelab](https://ars.electronica.art/futurelab/)
 AefPharus plugin by Ars Electronica Futurelab
+
 
 ---
 
