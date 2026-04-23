@@ -1,0 +1,18 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.0",
+    "FriendlyName": "QuantumTools",
+    "Description": "Development and testing utilities for QuantumZOOM — not included in shipping builds.",
+    "Category": "Dev",
+    "CreatedBy": "wilhelm-media",
+    "CanContainContent": false,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "QuantumTools",
+            "Type": "Editor",
+            "LoadingPhase": "Default"
+        }
+    ]
+}

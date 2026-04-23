@@ -16,6 +16,10 @@
 		{
 			"Name": "Switchboard",
 			"Enabled": true
+		},
+		{
+			"Name": "QuantumTools",
+			"Enabled": true
 		}
 	],
 	"TargetPlatforms": [
