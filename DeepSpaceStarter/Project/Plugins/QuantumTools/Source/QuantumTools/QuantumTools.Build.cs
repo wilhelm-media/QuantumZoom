@@ -11,7 +11,10 @@ public class QuantumTools : ModuleRules
             "Core",
             "CoreUObject",
             "Engine",
-            "DisplayCluster"
+            "DisplayCluster",
+            "LevelSequence",
+            "MovieScene",
+            "CinematicCamera"
         });
     }
 }
