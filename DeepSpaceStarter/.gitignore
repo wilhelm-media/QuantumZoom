@@ -20,6 +20,7 @@ Project/Plugins/QuantumTools/Binaries/
 Project/Plugins/QuantumTools/Intermediate/
 Project/Plugins/QuantumZoom/Binaries/
 Project/Plugins/QuantumZoom/Intermediate/
+Project/Plugins/QuantumZoom/Source/QZoom/Intermediate/
 
 # Plugins (external, not version-controlled)
 Project/Plugins/AefDeepSync/

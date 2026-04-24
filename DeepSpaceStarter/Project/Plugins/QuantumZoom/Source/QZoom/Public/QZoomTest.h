@@ -23,7 +23,7 @@ class ACineCameraActor;
  * DCRA found by tag "NDisplayRoot" (set this tag on your DCRA in the level).
  */
 UCLASS()
-class QUANTUMZOOM_API AQZoomTest : public AActor
+class QZOOM_API AQZoomTest : public AActor
 {
     GENERATED_BODY()
 

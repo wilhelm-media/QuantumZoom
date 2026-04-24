@@ -16,7 +16,7 @@
     ],
     "Modules": [
         {
-            "Name": "QuantumZoom",
+            "Name": "QZoom",
             "Type": "Runtime",
             "LoadingPhase": "Default"
         }
