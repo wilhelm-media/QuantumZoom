@@ -68,10 +68,6 @@ public:
     UPROPERTY(EditAnywhere, Category="QZoom|Transition", meta=(ClampMin="1.0", ClampMax="5.0"))
     float TransitionExponent = 2.f;
 
-    /** Actor tag used to find the DisplayClusterRootActor in the level */
-    UPROPERTY(EditAnywhere, Category="QZoom|Transition")
-    FName DCRATag = "NDisplayRoot";
-
 protected:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaTime) override;

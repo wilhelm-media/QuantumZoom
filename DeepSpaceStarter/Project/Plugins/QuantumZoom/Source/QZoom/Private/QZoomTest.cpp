@@ -33,24 +33,15 @@ void AQZoomTest::BeginPlay()
         return;
     }
 
-    TArray<AActor*> Found;
-    UGameplayStatics::GetAllActorsWithTag(GetWorld(), DCRATag, Found);
-    if (Found.Num() > 0 && IsValid(Found[0]))
+    DCRA = UGameplayStatics::GetActorOfClass(GetWorld(), ADisplayClusterRootActor::StaticClass());
+    if (DCRA)
     {
-        DCRA = Found[0];
-        UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA found via tag '%s'"), *DCRATag.ToString());
+        UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA found: %s"), *DCRA->GetName());
     }
     else
     {
-        DCRA = UGameplayStatics::GetActorOfClass(GetWorld(), ADisplayClusterRootActor::StaticClass());
-        if (DCRA)
-        {
-            UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA found by class (no tag)"));
-        }
-        else
-        {
-            UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] No DCRA found - zoom disabled"));
-        }
+        UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] No DisplayClusterRootActor found - zoom disabled"));
+        SetActorTickEnabled(false);
     }
 }
 
