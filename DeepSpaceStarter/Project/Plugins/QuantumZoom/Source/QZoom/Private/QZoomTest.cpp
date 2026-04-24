@@ -142,7 +142,7 @@ void AQZoomTest::StartReturnToZoom()
     if (!DCRA) return;
 
     StopActiveSequence();
-    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransformRules);
+    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 
     TransitionStart      = DCRA->GetActorTransform();
     TransitionEnd        = ZoomHomeTransform;
@@ -159,7 +159,7 @@ void AQZoomTest::ResetToHome()
     if (!DCRA) return;
 
     StopActiveSequence();
-    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransformRules);
+    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
     DCRA->SetActorTransform(ZoomHomeTransform);
     bInCinematicMode = false;
     bTransitioning   = false;
