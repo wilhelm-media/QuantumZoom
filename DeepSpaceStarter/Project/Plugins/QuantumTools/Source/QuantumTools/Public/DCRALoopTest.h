@@ -4,17 +4,6 @@
 #include "GameFramework/Actor.h"
 #include "DCRALoopTest.generated.h"
 
-/**
- * DCRA Loop Test Actor
- *
- * Place freely in the level — placed position = center of oscillation.
- * A sphere marks the current DCRA position. The DCRA is synced to the
- * sphere each frame so you can verify nDisplay picks up DCRA movement.
- *
- * Sphere moves, view shifts   → DCRA navigation works
- * Sphere moves, view static   → nDisplay ignores runtime DCRA moves
- * Nothing moves               → check Output Log for [DCRALoopTest]
- */
 UCLASS()
 class QUANTUMTOOLS_API ADCRALoopTest : public AActor
 {
@@ -22,6 +11,12 @@ class QUANTUMTOOLS_API ADCRALoopTest : public AActor
 
 public:
     ADCRALoopTest();
+
+    // --- Origin ---
+
+    /** Center of oscillation in world space (cm). Overrides the actor's placed position. */
+    UPROPERTY(EditAnywhere, Category = "DCRA Loop")
+    FVector OscillationCenter = FVector::ZeroVector;
 
     // --- Loop ---
 
@@ -47,7 +42,7 @@ public:
     UPROPERTY(EditAnywhere, Category = "DCRA Loop|Sphere")
     bool bShowSphere = true;
 
-    /** Sphere diameter in cm (default 100cm) */
+    /** Sphere diameter in cm */
     UPROPERTY(EditAnywhere, Category = "DCRA Loop|Sphere", meta = (ClampMin = "1.0"))
     float SphereSize = 100.f;
 
@@ -62,9 +57,6 @@ protected:
 private:
     UPROPERTY()
     UStaticMeshComponent* SphereMesh = nullptr;
-
-    UPROPERTY()
-    UMaterialInstanceDynamic* SphereMat = nullptr;
 
     AActor* DCRA = nullptr;
     FVector Origin = FVector::ZeroVector;

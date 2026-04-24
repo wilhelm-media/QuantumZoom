@@ -8,6 +8,12 @@
     "CreatedBy": "wilhelm-media",
     "CanContainContent": false,
     "Installed": false,
+    "Plugins": [
+        {
+            "Name": "nDisplay",
+            "Enabled": true
+        }
+    ],
     "Modules": [
         {
             "Name": "QuantumTools",
