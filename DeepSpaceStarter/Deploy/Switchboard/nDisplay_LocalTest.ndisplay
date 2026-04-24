@@ -178,7 +178,7 @@
 					"renderHeadless": false,
 					"graphicsAdapter": -1,
 					"textureShare": false,
-					"window": { "x": 960, "y": 0, "w": 960, "h": 540 },
+					"window": { "x": 0, "y": 540, "w": 960, "h": 540 },
 					"postprocess": {},
 					"viewports":
 					{
