@@ -15,9 +15,11 @@ Project/Plugins/**/Binaries/**/*.pdb
 !Project/Plugins/**/Binaries/**/*.dll
 !Project/Plugins/**/Binaries/**/*.modules
 
-# QuantumTools — dev-only plugin, always compiled from source
+# Dev plugins — always compiled from source, never committed
 Project/Plugins/QuantumTools/Binaries/
 Project/Plugins/QuantumTools/Intermediate/
+Project/Plugins/QuantumZoom/Binaries/
+Project/Plugins/QuantumZoom/Intermediate/
 
 # Plugins (external, not version-controlled)
 Project/Plugins/AefDeepSync/

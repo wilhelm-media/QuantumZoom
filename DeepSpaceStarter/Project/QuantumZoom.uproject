@@ -20,6 +20,10 @@
 		{
 			"Name": "QuantumTools",
 			"Enabled": true
+		},
+		{
+			"Name": "QuantumZoom",
+			"Enabled": true
 		}
 	],
 	"TargetPlatforms": [

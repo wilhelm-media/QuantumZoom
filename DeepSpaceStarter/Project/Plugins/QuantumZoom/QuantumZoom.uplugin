@@ -1,0 +1,24 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.1",
+    "FriendlyName": "QuantumZoom",
+    "Description": "Project-specific runtime code for QuantumZOOM — zoom system, transitions, stage management.",
+    "Category": "QuantumZOOM",
+    "CreatedBy": "wilhelm-media",
+    "CanContainContent": true,
+    "Installed": false,
+    "Plugins": [
+        {
+            "Name": "nDisplay",
+            "Enabled": true
+        }
+    ],
+    "Modules": [
+        {
+            "Name": "QuantumZoom",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        }
+    ]
+}
