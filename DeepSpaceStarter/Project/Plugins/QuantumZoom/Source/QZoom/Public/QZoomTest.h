@@ -12,15 +12,12 @@ class ACineCameraActor;
 /**
  * QZoomTest
  *
- * Drop into level. Assign sequences + cameras in Details panel.
- *
- * R1 (hold)       = Zoom In  — moves DCRA along +ZoomAxis
- * L1 (hold)       = Zoom Out — moves DCRA along -ZoomAxis
+ * R1 (hold)       = Zoom In
+ * L1 (hold)       = Zoom Out
  * D-Pad Left      = Transition to SequenceA + CameraA
  * D-Pad Right     = Transition to SequenceB + CameraB
- *
- * Transition: DCRA lerps to target camera → attaches → sequence plays.
- * DCRA found by tag "NDisplayRoot" (set this tag on your DCRA in the level).
+ * D-Pad Up        = Smooth return to ZoomCam (detach from cinematic, lerp to home)
+ * D-Pad Down      = Instant reset to home position
  */
 UCLASS()
 class QZOOM_API AQZoomTest : public AActor
@@ -32,7 +29,7 @@ public:
 
     // --- Zoom ---
 
-    /** World axis to zoom along — normalized at runtime */
+    /** World axis to zoom along */
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     FVector ZoomAxis = FVector(1.f, 0.f, 0.f);
 
@@ -40,27 +37,30 @@ public:
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     float ZoomSpeed = 200.f;
 
+    /**
+     * Home transform the DCRA returns to on D-Pad Up/Down.
+     * If left at default (0,0,0) it is captured from the DCRA at BeginPlay.
+     */
+    UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
+    FTransform ZoomHomeTransform;
+
     // --- Sequences ---
 
-    /** Level Sequence for D-Pad Left */
     UPROPERTY(EditAnywhere, Category="QZoom|Sequences")
     TSoftObjectPtr<ULevelSequence> SequenceA;
 
-    /** Camera actor for Sequence A — DCRA attaches to this on transition */
     UPROPERTY(EditAnywhere, Category="QZoom|Sequences")
     TObjectPtr<ACineCameraActor> CameraA;
 
-    /** Level Sequence for D-Pad Right */
     UPROPERTY(EditAnywhere, Category="QZoom|Sequences")
     TSoftObjectPtr<ULevelSequence> SequenceB;
 
-    /** Camera actor for Sequence B */
     UPROPERTY(EditAnywhere, Category="QZoom|Sequences")
     TObjectPtr<ACineCameraActor> CameraB;
 
     // --- Transition ---
 
-    /** Seconds for DCRA to lerp from current position to target camera */
+    /** Lerp duration in seconds (used for both cinematic and return transitions) */
     UPROPERTY(EditAnywhere, Category="QZoom|Transition", meta=(ClampMin="0.1"))
     float TransitionDuration = 1.5f;
 
@@ -76,17 +76,24 @@ private:
     void HandleZoom(float DeltaTime);
     void HandleDPadInput();
     void StartTransition(ACineCameraActor* TargetCamera, TSoftObjectPtr<ULevelSequence> Sequence);
+    void StartReturnToZoom();
+    void ResetToHome();
+    void StopActiveSequence();
     void TickTransition(float DeltaTime);
     void CompleteTransition();
 
     AActor* DCRA = nullptr;
     bool bIsPrimary = false;
+    bool bInCinematicMode = false;
 
     bool bDPadLeftPrev  = false;
     bool bDPadRightPrev = false;
+    bool bDPadUpPrev    = false;
+    bool bDPadDownPrev  = false;
 
-    bool bTransitioning = false;
-    float TransitionAlpha = 0.f;
+    bool bTransitioning     = false;
+    bool bIsReturnTransition = false;
+    float TransitionAlpha   = 0.f;
     FTransform TransitionStart;
     FTransform TransitionEnd;
 

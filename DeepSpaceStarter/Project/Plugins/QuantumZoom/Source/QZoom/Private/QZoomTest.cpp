@@ -34,14 +34,19 @@ void AQZoomTest::BeginPlay()
     }
 
     DCRA = UGameplayStatics::GetActorOfClass(GetWorld(), ADisplayClusterRootActor::StaticClass());
-    if (DCRA)
+    if (!DCRA)
     {
-        UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA found: %s"), *DCRA->GetName());
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] No DisplayClusterRootActor found - zoom disabled"));
+        UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] No DisplayClusterRootActor found - disabled"));
         SetActorTickEnabled(false);
+        return;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA found: %s"), *DCRA->GetName());
+
+    // Capture home transform from DCRA if not set manually
+    if (ZoomHomeTransform.Equals(FTransform::Identity))
+    {
+        ZoomHomeTransform = DCRA->GetActorTransform();
     }
 }
 
@@ -49,13 +54,11 @@ void AQZoomTest::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (!DCRA) return;
-
     if (bTransitioning)
     {
         TickTransition(DeltaTime);
     }
-    else
+    else if (!bInCinematicMode)
     {
         HandleZoom(DeltaTime);
     }
@@ -74,8 +77,7 @@ void AQZoomTest::HandleZoom(float DeltaTime)
     if (!bZoomIn && !bZoomOut) return;
 
     const float Dir = bZoomIn ? 1.f : -1.f;
-    const FVector Delta = ZoomAxis.GetSafeNormal() * ZoomSpeed * DeltaTime * Dir;
-    DCRA->SetActorLocation(DCRA->GetActorLocation() + Delta);
+    DCRA->SetActorLocation(DCRA->GetActorLocation() + ZoomAxis.GetSafeNormal() * ZoomSpeed * DeltaTime * Dir);
 }
 
 void AQZoomTest::HandleDPadInput()
@@ -85,58 +87,101 @@ void AQZoomTest::HandleDPadInput()
 
     const bool bLeft  = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Left);
     const bool bRight = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Right);
+    const bool bUp    = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Up);
+    const bool bDown  = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Down);
 
-    if (bLeft && !bDPadLeftPrev)
+    if (bLeft && !bDPadLeftPrev && !bTransitioning)
     {
         if (IsValid(CameraA) && SequenceA.IsValid())
-        {
             StartTransition(CameraA, SequenceA);
-        }
         else
-        {
             UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] CameraA or SequenceA not assigned"));
-        }
     }
 
-    if (bRight && !bDPadRightPrev)
+    if (bRight && !bDPadRightPrev && !bTransitioning)
     {
         if (IsValid(CameraB) && SequenceB.IsValid())
-        {
             StartTransition(CameraB, SequenceB);
-        }
         else
-        {
             UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] CameraB or SequenceB not assigned"));
-        }
+    }
+
+    if (bUp && !bDPadUpPrev && !bTransitioning)
+    {
+        StartReturnToZoom();
+    }
+
+    if (bDown && !bDPadDownPrev && !bTransitioning)
+    {
+        ResetToHome();
     }
 
     bDPadLeftPrev  = bLeft;
     bDPadRightPrev = bRight;
+    bDPadUpPrev    = bUp;
+    bDPadDownPrev  = bDown;
 }
 
 void AQZoomTest::StartTransition(ACineCameraActor* TargetCamera, TSoftObjectPtr<ULevelSequence> Sequence)
 {
     if (!IsValid(TargetCamera) || !DCRA) return;
 
-    PendingCamera   = TargetCamera;
-    PendingSequence = Sequence;
+    PendingCamera        = TargetCamera;
+    PendingSequence      = Sequence;
+    TransitionStart      = DCRA->GetActorTransform();
+    TransitionEnd        = TargetCamera->GetActorTransform();
+    TransitionAlpha      = 0.f;
+    bTransitioning       = true;
+    bIsReturnTransition  = false;
 
-    TransitionStart = DCRA->GetActorTransform();
-    TransitionEnd   = TargetCamera->GetActorTransform();
-    TransitionAlpha = 0.f;
-    bTransitioning  = true;
+    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Transition -> %s"), *TargetCamera->GetName());
+}
 
-    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Transition started -> %s"), *TargetCamera->GetName());
+void AQZoomTest::StartReturnToZoom()
+{
+    if (!DCRA) return;
+
+    StopActiveSequence();
+    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransformRules);
+
+    TransitionStart      = DCRA->GetActorTransform();
+    TransitionEnd        = ZoomHomeTransform;
+    TransitionAlpha      = 0.f;
+    bTransitioning       = true;
+    bIsReturnTransition  = true;
+    bInCinematicMode     = false;
+
+    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Returning to ZoomCam"));
+}
+
+void AQZoomTest::ResetToHome()
+{
+    if (!DCRA) return;
+
+    StopActiveSequence();
+    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransformRules);
+    DCRA->SetActorTransform(ZoomHomeTransform);
+    bInCinematicMode = false;
+    bTransitioning   = false;
+
+    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Reset to home"));
+}
+
+void AQZoomTest::StopActiveSequence()
+{
+    if (IsValid(SequencePlayer) && SequencePlayer->IsPlaying())
+    {
+        SequencePlayer->Stop();
+    }
 }
 
 void AQZoomTest::TickTransition(float DeltaTime)
 {
     TransitionAlpha = FMath::Clamp(TransitionAlpha + DeltaTime / TransitionDuration, 0.f, 1.f);
 
-    const float T = FMath::InterpEaseInOut(0.f, 1.f, TransitionAlpha, TransitionExponent);
-
-    const FVector Loc = FMath::Lerp(TransitionStart.GetLocation(), TransitionEnd.GetLocation(), T);
-    const FQuat   Rot = FQuat::Slerp(TransitionStart.GetRotation(), TransitionEnd.GetRotation(), T);
+    const float T   = FMath::InterpEaseInOut(0.f, 1.f, TransitionAlpha, TransitionExponent);
+    const FVector  Loc = FMath::Lerp(TransitionStart.GetLocation(), TransitionEnd.GetLocation(), T);
+    const FQuat    Rot = FQuat::Slerp(TransitionStart.GetRotation(), TransitionEnd.GetRotation(), T);
 
     DCRA->SetActorLocationAndRotation(Loc, Rot);
 
@@ -150,15 +195,25 @@ void AQZoomTest::CompleteTransition()
 {
     bTransitioning = false;
 
-    if (IsValid(PendingCamera) && IsValid(DCRA))
+    if (bIsReturnTransition)
+    {
+        bIsReturnTransition = false;
+        UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Back in ZoomCam mode"));
+        return;
+    }
+
+    // Cinematic transition complete — attach DCRA to camera
+    if (IsValid(PendingCamera))
     {
         DCRA->AttachToComponent(
             PendingCamera->GetRootComponent(),
             FAttachmentTransformRules(EAttachmentRule::SnapToTarget, EAttachmentRule::SnapToTarget, EAttachmentRule::KeepRelative, false)
         );
+        bInCinematicMode = true;
         UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA attached to %s"), *PendingCamera->GetName());
     }
 
+    // Play sequence
     ULevelSequence* Seq = PendingSequence.LoadSynchronous();
     if (IsValid(Seq))
     {
@@ -166,7 +221,7 @@ void AQZoomTest::CompleteTransition()
         Settings.bAutoPlay = true;
         ALevelSequenceActor* OutActor = nullptr;
         SequencePlayer = ULevelSequencePlayer::CreateLevelSequencePlayer(GetWorld(), Seq, Settings, OutActor);
-        SequenceActor = OutActor;
+        SequenceActor  = OutActor;
         if (SequencePlayer)
         {
             SequencePlayer->Play();
