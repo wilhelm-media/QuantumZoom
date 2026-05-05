@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Cluster/IDisplayClusterClusterEventListener.h"
 #include "QZoomTest.generated.h"
 
 class ULevelSequence;
@@ -16,11 +17,14 @@ class ACineCameraActor;
  * L1 (hold)       = Zoom Out
  * D-Pad Left      = Transition to SequenceA + CameraA
  * D-Pad Right     = Transition to SequenceB + CameraB
- * D-Pad Up        = Smooth return to ZoomCam (detach from cinematic, lerp to home)
- * D-Pad Down      = Instant reset to home position
+ * D-Pad Up        = Smooth return to ZoomCam
+ * D-Pad Down      = Instant reset to home
+ *
+ * DCRA position is broadcast via nDisplay Cluster Events so all
+ * nodes (Wall + Floor) stay in sync.
  */
 UCLASS()
-class QZOOM_API AQZoomTest : public AActor
+class QZOOM_API AQZoomTest : public AActor, public IDisplayClusterClusterEventListener
 {
     GENERATED_BODY()
 
@@ -29,18 +33,12 @@ public:
 
     // --- Zoom ---
 
-    /** World axis to zoom along */
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     FVector ZoomAxis = FVector(1.f, 0.f, 0.f);
 
-    /** Movement speed in cm/s while shoulder button is held */
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     float ZoomSpeed = 200.f;
 
-    /**
-     * Home transform the DCRA returns to on D-Pad Up/Down.
-     * If left at default (0,0,0) it is captured from the DCRA at BeginPlay.
-     */
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     FTransform ZoomHomeTransform;
 
@@ -60,17 +58,19 @@ public:
 
     // --- Transition ---
 
-    /** Lerp duration in seconds (used for both cinematic and return transitions) */
     UPROPERTY(EditAnywhere, Category="QZoom|Transition", meta=(ClampMin="0.1"))
     float TransitionDuration = 1.5f;
 
-    /** Easing exponent: 1=linear, 2=quadratic, 3=cubic */
     UPROPERTY(EditAnywhere, Category="QZoom|Transition", meta=(ClampMin="1.0", ClampMax="5.0"))
     float TransitionExponent = 2.f;
 
 protected:
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Tick(float DeltaTime) override;
+
+    // IDisplayClusterClusterEventListener — fires on ALL nodes
+    virtual void OnClusterEventJson(const FDisplayClusterClusterEventJson& Event) override;
 
 private:
     void HandleZoom(float DeltaTime);
@@ -82,6 +82,13 @@ private:
     void TickTransition(float DeltaTime);
     void CompleteTransition();
 
+    /** Broadcast new DCRA transform to all cluster nodes */
+    void BroadcastDCRATransform(const FVector& Loc, const FQuat& Rot);
+    /** Apply transform to local DCRA — called on all nodes via cluster event */
+    void ApplyDCRATransform(const FVector& Loc, const FQuat& Rot);
+
+    static const FString ClusterEventName;
+
     AActor* DCRA = nullptr;
     bool bIsPrimary = false;
     bool bInCinematicMode = false;
@@ -91,9 +98,9 @@ private:
     bool bDPadUpPrev    = false;
     bool bDPadDownPrev  = false;
 
-    bool bTransitioning     = false;
+    bool bTransitioning      = false;
     bool bIsReturnTransition = false;
-    float TransitionAlpha   = 0.f;
+    float TransitionAlpha    = 0.f;
     FTransform TransitionStart;
     FTransform TransitionEnd;
 

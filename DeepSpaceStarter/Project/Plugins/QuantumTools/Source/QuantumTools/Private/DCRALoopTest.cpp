@@ -5,6 +5,9 @@
 #include "DisplayClusterRootActor.h"
 #include "IDisplayCluster.h"
 #include "Cluster/IDisplayClusterClusterManager.h"
+#include "Cluster/DisplayClusterClusterEvent.h"
+
+const FString ADCRALoopTest::ClusterEventName = TEXT("DCRALoop.Transform");
 
 ADCRALoopTest::ADCRALoopTest()
 {
@@ -20,17 +23,8 @@ void ADCRALoopTest::BeginPlay()
 {
     Super::BeginPlay();
 
-    // --- Build sphere at runtime (more reliable than constructor helpers in nDisplay) ---
     UStaticMesh* Mesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-    if (Mesh)
-    {
-        SphereMesh->SetStaticMesh(Mesh);
-        UE_LOG(LogTemp, Log, TEXT("[DCRALoopTest] Sphere mesh loaded OK"));
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[DCRALoopTest] Sphere mesh load FAILED"));
-    }
+    if (Mesh) SphereMesh->SetStaticMesh(Mesh);
 
     UMaterial* BaseMat = LoadObject<UMaterial>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
     if (BaseMat)
@@ -40,44 +34,40 @@ void ADCRALoopTest::BeginPlay()
         SphereMesh->SetMaterial(0, DynMat);
     }
 
-    const float Scale = FMath::Max(SphereSize, 1.f) / 100.f;
-    SphereMesh->SetRelativeScale3D(FVector(Scale));
+    SphereMesh->SetRelativeScale3D(FVector(FMath::Max(SphereSize, 1.f) / 100.f));
     SphereMesh->SetVisibility(bShowSphere, true);
 
-    // --- Cluster role ---
     if (IDisplayCluster::IsAvailable())
     {
         bIsPrimary = IDisplayCluster::Get().GetClusterMgr()->IsPrimary();
+        IDisplayCluster::Get().GetClusterMgr()->AddClusterEventJsonListener(this);
     }
     else
     {
         bIsPrimary = true;
     }
 
+    // Secondary nodes only listen — no tick needed
     if (!bActive || !bIsPrimary)
     {
         SetActorTickEnabled(false);
-        return;
     }
 
-    // OscillationCenter = explicit world position if set, otherwise actor's placed location
-    Origin = OscillationCenter.IsZero() ? GetActorLocation() : OscillationCenter;
+    if (!bIsPrimary) return;
 
-    // Move actor to origin so sphere starts at the right place
+    Origin = OscillationCenter.IsZero() ? GetActorLocation() : OscillationCenter;
     SetActorLocation(Origin);
 
-    // --- Find DCRA ---
     DCRA = UGameplayStatics::GetActorOfClass(GetWorld(), ADisplayClusterRootActor::StaticClass());
+    UE_LOG(LogTemp, Log, TEXT("[DCRALoopTest] DCRA: %s | Primary: YES"),
+        DCRA ? *DCRA->GetActorLocation().ToString() : TEXT("NOT FOUND"));
+}
 
-    if (DCRA)
-    {
-        UE_LOG(LogTemp, Log, TEXT("[DCRALoopTest] DCRA found at %s | Oscillation center: %s"),
-            *DCRA->GetActorLocation().ToString(), *Origin.ToString());
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[DCRALoopTest] No DisplayClusterRootActor found — sphere moves, DCRA sync disabled"));
-    }
+void ADCRALoopTest::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (IDisplayCluster::IsAvailable())
+        IDisplayCluster::Get().GetClusterMgr()->RemoveClusterEventJsonListener(this);
+    Super::EndPlay(EndPlayReason);
 }
 
 void ADCRALoopTest::Tick(float DeltaTime)
@@ -85,14 +75,37 @@ void ADCRALoopTest::Tick(float DeltaTime)
     Super::Tick(DeltaTime);
 
     Time += DeltaTime;
-
     const float Angle = (CycleDuration > 0.f) ? (Time / CycleDuration) * TWO_PI : 0.f;
-    const FVector NewLocation = Origin + Axis.GetSafeNormal() * Amplitude * FMath::Sin(Angle);
+    const FVector NewLoc = Origin + Axis.GetSafeNormal() * Amplitude * FMath::Sin(Angle);
 
-    SetActorLocation(NewLocation);
+    SetActorLocation(NewLoc);
 
-    if (DCRA)
+    if (!DCRA) return;
+
+    if (IDisplayCluster::IsAvailable())
     {
-        DCRA->SetActorLocation(NewLocation);
+        FDisplayClusterClusterEventJson Event;
+        Event.Name     = ClusterEventName;
+        Event.Type     = TEXT("Transform");
+        Event.Category = TEXT("DCRALoop");
+        Event.bShouldDiscardOnRepeat = false;
+        Event.Parameters.Add(TEXT("X"), FString::SanitizeFloat(NewLoc.X));
+        Event.Parameters.Add(TEXT("Y"), FString::SanitizeFloat(NewLoc.Y));
+        Event.Parameters.Add(TEXT("Z"), FString::SanitizeFloat(NewLoc.Z));
+        IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
     }
+    else
+    {
+        DCRA->SetActorLocation(NewLoc);
+    }
+}
+
+void ADCRALoopTest::OnClusterEventJson(const FDisplayClusterClusterEventJson& Event)
+{
+    if (Event.Name != ClusterEventName || !DCRA) return;
+
+    const float X = FCString::Atof(*Event.Parameters.FindRef(TEXT("X")));
+    const float Y = FCString::Atof(*Event.Parameters.FindRef(TEXT("Y")));
+    const float Z = FCString::Atof(*Event.Parameters.FindRef(TEXT("Z")));
+    DCRA->SetActorLocation(FVector(X, Y, Z));
 }
