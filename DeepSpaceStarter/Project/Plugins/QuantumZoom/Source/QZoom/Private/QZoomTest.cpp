@@ -233,6 +233,12 @@ void AQZoomTest::StopActiveSequence()
 
 void AQZoomTest::TickTransition(float DeltaTime)
 {
+    // Keep target locked to camera's current position in case it moved
+    if (!bIsReturnTransition && IsValid(PendingCamera))
+    {
+        TransitionEnd = PendingCamera->GetActorTransform();
+    }
+
     TransitionAlpha = FMath::Clamp(TransitionAlpha + DeltaTime / TransitionDuration, 0.f, 1.f);
 
     const float T   = FMath::InterpEaseInOut(0.f, 1.f, TransitionAlpha, TransitionExponent);
@@ -257,9 +263,10 @@ void AQZoomTest::CompleteTransition()
 
     if (IsValid(PendingCamera))
     {
+        // KeepWorldTransform — DCRA stays at lerp endpoint, no snap/cut
         DCRA->AttachToComponent(
             PendingCamera->GetRootComponent(),
-            FAttachmentTransformRules(EAttachmentRule::SnapToTarget, EAttachmentRule::SnapToTarget, EAttachmentRule::KeepRelative, false)
+            FAttachmentTransformRules(EAttachmentRule::KeepWorldTransform, EAttachmentRule::KeepWorldTransform, EAttachmentRule::KeepRelative, false)
         );
         bInCinematicMode = true;
         UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA attached to %s"), *PendingCamera->GetName());
