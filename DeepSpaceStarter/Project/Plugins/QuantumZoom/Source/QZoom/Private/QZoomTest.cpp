@@ -88,7 +88,15 @@ void AQZoomTest::Tick(float DeltaTime)
     {
         TickTransition(DeltaTime);
     }
-    else if (!bInCinematicMode)
+    else if (bInCinematicMode)
+    {
+        // Poll active camera every frame and broadcast to all nodes (fixes Floor sync)
+        if (IsValid(ActiveCamera))
+        {
+            BroadcastDCRATransform(ActiveCamera->GetActorLocation(), ActiveCamera->GetActorQuat());
+        }
+    }
+    else
     {
         APlayerController* PC = GetWorld()->GetFirstPlayerController();
         const bool bFreeFlight = PC && PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftTriggerAxis) > 0.1f;
@@ -243,7 +251,7 @@ void AQZoomTest::StartReturnToZoom()
     if (!DCRA) return;
 
     StopActiveSequence();
-    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+    ActiveCamera        = nullptr;
 
     TransitionStart     = DCRA->GetActorTransform();
     TransitionEnd       = ZoomHomeTransform;
@@ -260,7 +268,7 @@ void AQZoomTest::ResetToHome()
     if (!DCRA) return;
 
     StopActiveSequence();
-    DCRA->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+    ActiveCamera     = nullptr;
     bInCinematicMode = false;
     bTransitioning   = false;
 
@@ -306,11 +314,10 @@ void AQZoomTest::CompleteTransition()
 
     if (IsValid(PendingCamera))
     {
-        // KeepWorld — DCRA stays at lerp endpoint, no snap/cut
-        const FAttachmentTransformRules Rules(EAttachmentRule::KeepWorld, EAttachmentRule::KeepWorld, EAttachmentRule::KeepRelative, false);
-        DCRA->AttachToComponent(PendingCamera->GetRootComponent(), Rules);
+        // No attachment — poll camera every Tick and broadcast to all nodes
+        ActiveCamera     = PendingCamera;
         bInCinematicMode = true;
-        UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA attached to %s"), *PendingCamera->GetName());
+        UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Cinematic mode: polling %s"), *PendingCamera->GetName());
     }
 
     ULevelSequence* Seq = PendingSequence.LoadSynchronous();

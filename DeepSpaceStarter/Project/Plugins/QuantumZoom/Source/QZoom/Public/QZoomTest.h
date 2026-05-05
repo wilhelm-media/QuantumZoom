@@ -117,7 +117,8 @@ private:
     FTransform TransitionStart;
     FTransform TransitionEnd;
 
-    ACineCameraActor* PendingCamera = nullptr;
+    ACineCameraActor* PendingCamera  = nullptr;
+    ACineCameraActor* ActiveCamera   = nullptr; // camera being polled in cinematic mode
     TSoftObjectPtr<ULevelSequence> PendingSequence;
 
     UPROPERTY()
