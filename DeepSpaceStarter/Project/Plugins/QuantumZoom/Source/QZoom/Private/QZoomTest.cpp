@@ -84,9 +84,15 @@ void AQZoomTest::Tick(float DeltaTime)
     Super::Tick(DeltaTime);
 
     if (bTransitioning)
+    {
         TickTransition(DeltaTime);
+    }
     else if (!bInCinematicMode)
-        HandleZoom(DeltaTime);
+    {
+        APlayerController* PC = GetWorld()->GetFirstPlayerController();
+        const bool bFreeFlight = PC && PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftTriggerAxis) > 0.1f;
+        bFreeFlight ? HandleFreeMovement(DeltaTime) : HandleZoom(DeltaTime);
+    }
 
     HandleDPadInput();
 }
@@ -153,6 +159,34 @@ void AQZoomTest::HandleZoom(float DeltaTime)
     const float Dir = bZoomIn ? 1.f : -1.f;
     const FVector NewLoc = DCRA->GetActorLocation() + ZoomAxis.GetSafeNormal() * ZoomSpeed * DeltaTime * Dir;
     BroadcastDCRATransform(NewLoc, DCRA->GetActorQuat());
+}
+
+// ─── Free Movement ────────────────────────────────────────────────────────────
+
+void AQZoomTest::HandleFreeMovement(float DeltaTime)
+{
+    APlayerController* PC = GetWorld()->GetFirstPlayerController();
+    if (!PC || !DCRA) return;
+
+    const float LX = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX);   // strafe
+    const float LY = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY);   // forward
+    const float RX = PC->GetInputAnalogKeyState(EKeys::Gamepad_RightX);  // yaw
+    const float RY = PC->GetInputAnalogKeyState(EKeys::Gamepad_RightY);  // up/down
+
+    const FTransform T = DCRA->GetActorTransform();
+    const FVector Forward = T.GetRotation().GetForwardVector();
+    const FVector Right   = T.GetRotation().GetRightVector();
+    const FVector Up      = FVector::UpVector;
+
+    FVector NewLoc = T.GetLocation()
+        + Forward * LY * FreeMoveSpeed * DeltaTime
+        + Right   * LX * FreeMoveSpeed * DeltaTime
+        + Up      * (-RY) * FreeMoveSpeed * DeltaTime;
+
+    FQuat NewRot = T.GetRotation() *
+        FQuat(FVector::UpVector, FMath::DegreesToRadians(RX * FreeRotateSpeed * DeltaTime));
+
+    BroadcastDCRATransform(NewLoc, NewRot);
 }
 
 // ─── D-Pad ────────────────────────────────────────────────────────────────────

@@ -39,6 +39,14 @@ public:
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     float ZoomSpeed = 200.f;
 
+    /** Free movement speed in cm/s (Left Trigger held + sticks) */
+    UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
+    float FreeMoveSpeed = 400.f;
+
+    /** Yaw rotation speed in degrees/s (Left Trigger held + Right Stick X) */
+    UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
+    float FreeRotateSpeed = 60.f;
+
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     FTransform ZoomHomeTransform;
 
@@ -74,6 +82,7 @@ protected:
 
 private:
     void HandleZoom(float DeltaTime);
+    void HandleFreeMovement(float DeltaTime);
     void HandleDPadInput();
     void StartTransition(ACineCameraActor* TargetCamera, TSoftObjectPtr<ULevelSequence> Sequence);
     void StartReturnToZoom();
