@@ -49,6 +49,21 @@ void AQZoomTest::BeginPlay()
     UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA: %s | Primary: %s"),
         *DCRA->GetName(), bIsPrimary ? TEXT("YES") : TEXT("NO"));
 
+    // Bind AudioListener to DCRA so spatialized sound follows the camera
+    if (bIsPrimary)
+    {
+        APlayerController* PC = GetWorld()->GetFirstPlayerController();
+        if (PC)
+        {
+            PC->SetAudioListenerOverride(
+                DCRA->GetRootComponent(),
+                FVector::ZeroVector,
+                FRotator::ZeroRotator
+            );
+            UE_LOG(LogTemp, Log, TEXT("[QZoomTest] AudioListener bound to DCRA"));
+        }
+    }
+
     if (ZoomHomeTransform.Equals(FTransform::Identity))
     {
         ZoomHomeTransform = DCRA->GetActorTransform();
