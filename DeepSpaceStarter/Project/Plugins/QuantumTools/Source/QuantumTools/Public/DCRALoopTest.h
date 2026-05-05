@@ -2,11 +2,12 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Cluster/IDisplayClusterClusterEventListener.h"
+#include "Cluster/DisplayClusterClusterEvent.h"
+#include "Cluster/IDisplayClusterClusterManager.h"
 #include "DCRALoopTest.generated.h"
 
 UCLASS()
-class QUANTUMTOOLS_API ADCRALoopTest : public AActor, public IDisplayClusterClusterEventListener
+class QUANTUMTOOLS_API ADCRALoopTest : public AActor
 {
     GENERATED_BODY()
 
@@ -42,7 +43,7 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Tick(float DeltaTime) override;
 
-    virtual void OnClusterEventJson(const FDisplayClusterClusterEventJson& Event) override;
+    void OnClusterEventJson(const FDisplayClusterClusterEventJson& Event);
 
 private:
     UPROPERTY()
@@ -54,4 +55,6 @@ private:
     bool bIsPrimary = false;
 
     static const FString ClusterEventName;
+
+    FOnClusterEventJsonListener ClusterEventDelegate;
 };

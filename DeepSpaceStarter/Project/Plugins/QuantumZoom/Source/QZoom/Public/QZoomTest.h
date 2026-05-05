@@ -2,7 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Cluster/IDisplayClusterClusterEventListener.h"
+#include "Cluster/DisplayClusterClusterEvent.h"
+#include "Cluster/IDisplayClusterClusterManager.h"
 #include "QZoomTest.generated.h"
 
 class ULevelSequence;
@@ -24,7 +25,7 @@ class ACineCameraActor;
  * nodes (Wall + Floor) stay in sync.
  */
 UCLASS()
-class QZOOM_API AQZoomTest : public AActor, public IDisplayClusterClusterEventListener
+class QZOOM_API AQZoomTest : public AActor
 {
     GENERATED_BODY()
 
@@ -77,8 +78,8 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
     virtual void Tick(float DeltaTime) override;
 
-    // IDisplayClusterClusterEventListener — fires on ALL nodes
-    virtual void OnClusterEventJson(const FDisplayClusterClusterEventJson& Event) override;
+    // Delegate target — fires on ALL nodes when DCRA transform event is received
+    void OnClusterEventJson(const FDisplayClusterClusterEventJson& Event);
 
 private:
     void HandleZoom(float DeltaTime);
@@ -97,6 +98,9 @@ private:
     void ApplyDCRATransform(const FVector& Loc, const FQuat& Rot);
 
     static const FString ClusterEventName;
+
+    /** Stored delegate handle — required to add/remove the same listener */
+    FOnClusterEventJsonListener ClusterEventDelegate;
 
     AActor* DCRA = nullptr;
     bool bIsPrimary = false;

@@ -40,7 +40,8 @@ void ADCRALoopTest::BeginPlay()
     if (IDisplayCluster::IsAvailable())
     {
         bIsPrimary = IDisplayCluster::Get().GetClusterMgr()->IsPrimary();
-        IDisplayCluster::Get().GetClusterMgr()->AddClusterEventJsonListener(this);
+        ClusterEventDelegate = FOnClusterEventJsonListener::CreateUObject(this, &ADCRALoopTest::OnClusterEventJson);
+        IDisplayCluster::Get().GetClusterMgr()->AddClusterEventJsonListener(ClusterEventDelegate);
     }
     else
     {
@@ -66,7 +67,7 @@ void ADCRALoopTest::BeginPlay()
 void ADCRALoopTest::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     if (IDisplayCluster::IsAvailable())
-        IDisplayCluster::Get().GetClusterMgr()->RemoveClusterEventJsonListener(this);
+        IDisplayCluster::Get().GetClusterMgr()->RemoveClusterEventJsonListener(ClusterEventDelegate);
     Super::EndPlay(EndPlayReason);
 }
 

@@ -25,7 +25,8 @@ void AQZoomTest::BeginPlay()
     {
         bIsPrimary = IDisplayCluster::Get().GetClusterMgr()->IsPrimary();
         // ALL nodes listen for DCRA transform events
-        IDisplayCluster::Get().GetClusterMgr()->AddClusterEventJsonListener(this);
+        ClusterEventDelegate = FOnClusterEventJsonListener::CreateUObject(this, &AQZoomTest::OnClusterEventJson);
+        IDisplayCluster::Get().GetClusterMgr()->AddClusterEventJsonListener(ClusterEventDelegate);
     }
     else
     {
@@ -74,7 +75,7 @@ void AQZoomTest::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
     if (IDisplayCluster::IsAvailable())
     {
-        IDisplayCluster::Get().GetClusterMgr()->RemoveClusterEventJsonListener(this);
+        IDisplayCluster::Get().GetClusterMgr()->RemoveClusterEventJsonListener(ClusterEventDelegate);
     }
     Super::EndPlay(EndPlayReason);
 }
