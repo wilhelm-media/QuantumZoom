@@ -201,8 +201,16 @@ void AQZoomTest::HandleDPadInput()
     const bool bUp    = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Up);
     const bool bDown  = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Down);
 
-    if (bLeft  && !bDPadLeftPrev  && !bTransitioning) { IsValid(CameraA) && SequenceA.IsValid() ? StartTransition(CameraA, SequenceA) : UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] CameraA/SequenceA not set")); }
-    if (bRight && !bDPadRightPrev && !bTransitioning) { IsValid(CameraB) && SequenceB.IsValid() ? StartTransition(CameraB, SequenceB) : UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] CameraB/SequenceB not set")); }
+    if (bLeft && !bDPadLeftPrev && !bTransitioning)
+    {
+        if (IsValid(CameraA) && SequenceA.IsValid()) StartTransition(CameraA, SequenceA);
+        else UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] CameraA/SequenceA not set"));
+    }
+    if (bRight && !bDPadRightPrev && !bTransitioning)
+    {
+        if (IsValid(CameraB) && SequenceB.IsValid()) StartTransition(CameraB, SequenceB);
+        else UE_LOG(LogTemp, Warning, TEXT("[QZoomTest] CameraB/SequenceB not set"));
+    }
     if (bUp    && !bDPadUpPrev    && !bTransitioning) { StartReturnToZoom(); }
     if (bDown  && !bDPadDownPrev  && !bTransitioning) { ResetToHome(); }
 
@@ -297,11 +305,9 @@ void AQZoomTest::CompleteTransition()
 
     if (IsValid(PendingCamera))
     {
-        // KeepWorldTransform — DCRA stays at lerp endpoint, no snap/cut
-        DCRA->AttachToComponent(
-            PendingCamera->GetRootComponent(),
-            FAttachmentTransformRules(EAttachmentRule::KeepWorldTransform, EAttachmentRule::KeepWorldTransform, EAttachmentRule::KeepRelative, false)
-        );
+        // KeepWorld — DCRA stays at lerp endpoint, no snap/cut
+        const FAttachmentTransformRules Rules(EAttachmentRule::KeepWorld, EAttachmentRule::KeepWorld, EAttachmentRule::KeepRelative, false);
+        DCRA->AttachToComponent(PendingCamera->GetRootComponent(), Rules);
         bInCinematicMode = true;
         UE_LOG(LogTemp, Log, TEXT("[QZoomTest] DCRA attached to %s"), *PendingCamera->GetName());
     }
