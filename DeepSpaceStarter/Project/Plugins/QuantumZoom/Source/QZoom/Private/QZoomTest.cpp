@@ -1,4 +1,5 @@
 #include "QZoomTest.h"
+#include "QPerfMonitor.h"
 #include "Kismet/GameplayStatics.h"
 #include "DisplayClusterRootActor.h"
 #include "IDisplayCluster.h"
@@ -7,6 +8,7 @@
 #include "LevelSequencePlayer.h"
 #include "LevelSequenceActor.h"
 #include "LevelSequence.h"
+#include "MovieSceneSequencePlayer.h"
 #include "CineCameraActor.h"
 #include "GameFramework/PlayerController.h"
 
@@ -104,6 +106,16 @@ void AQZoomTest::Tick(float DeltaTime)
     }
 
     HandleDPadInput();
+
+    // Component-based SetAudioListenerOverride is unreliable in nDisplay standalone mode.
+    // Push the listener position explicitly every frame so spatialization tracks DCRA.
+    if (IsValid(DCRA))
+    {
+        if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+        {
+            PC->SetAudioListenerOverride(nullptr, DCRA->GetActorLocation(), DCRA->GetActorRotation());
+        }
+    }
 }
 
 // ─── Cluster Event ────────────────────────────────────────────────────────────
@@ -202,6 +214,8 @@ void AQZoomTest::HandleFreeMovement(float DeltaTime)
 
 void AQZoomTest::HandleDPadInput()
 {
+    if (AQPerfMonitor::bIsOverlayCapturingInput) return;
+
     APlayerController* PC = GetWorld()->GetFirstPlayerController();
     if (!PC) return;
 
@@ -235,10 +249,35 @@ void AQZoomTest::StartTransition(ACineCameraActor* TargetCamera, TSoftObjectPtr<
 {
     if (!IsValid(TargetCamera) || !DCRA) return;
 
+    StopActiveSequence();
+    if (IsValid(SequenceActor))
+    {
+        SequenceActor->Destroy();
+        SequenceActor  = nullptr;
+        SequencePlayer = nullptr;
+    }
+    ActiveCamera     = nullptr;
+    bInCinematicMode = false;
+
+    // Pre-create the sequence player and evaluate frame 0 so TargetCamera
+    // moves to its sequence-start pose. TransitionEnd then matches exactly,
+    // eliminating the snap when CompleteTransition fires.
+    ULevelSequence* Seq = Sequence.LoadSynchronous();
+    if (IsValid(Seq))
+    {
+        FMovieSceneSequencePlaybackSettings Settings;
+        Settings.bAutoPlay = false;
+        ALevelSequenceActor* OutActor = nullptr;
+        SequencePlayer = ULevelSequencePlayer::CreateLevelSequencePlayer(GetWorld(), Seq, Settings, OutActor);
+        SequenceActor  = OutActor;
+        if (SequencePlayer)
+            SequencePlayer->SetPlaybackPosition(FMovieSceneSequencePlaybackParams(0.f, EUpdatePositionMethod::Jump));
+    }
+
     PendingCamera       = TargetCamera;
     PendingSequence     = Sequence;
     TransitionStart     = DCRA->GetActorTransform();
-    TransitionEnd       = TargetCamera->GetActorTransform();
+    TransitionEnd       = TargetCamera->GetActorTransform();  // frame 0 pose
     TransitionAlpha     = 0.f;
     bTransitioning      = true;
     bIsReturnTransition = false;
@@ -284,12 +323,6 @@ void AQZoomTest::StopActiveSequence()
 
 void AQZoomTest::TickTransition(float DeltaTime)
 {
-    // Keep target locked to camera's current position in case it moved
-    if (!bIsReturnTransition && IsValid(PendingCamera))
-    {
-        TransitionEnd = PendingCamera->GetActorTransform();
-    }
-
     TransitionAlpha = FMath::Clamp(TransitionAlpha + DeltaTime / TransitionDuration, 0.f, 1.f);
 
     const float T   = FMath::InterpEaseInOut(0.f, 1.f, TransitionAlpha, TransitionExponent);
@@ -320,15 +353,23 @@ void AQZoomTest::CompleteTransition()
         UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Cinematic mode: polling %s"), *PendingCamera->GetName());
     }
 
-    ULevelSequence* Seq = PendingSequence.LoadSynchronous();
-    if (IsValid(Seq))
+    // Player was pre-created and parked at t=0 in StartTransition — just play
+    if (IsValid(SequencePlayer))
     {
-        FMovieSceneSequencePlaybackSettings Settings;
-        Settings.bAutoPlay = true;
-        ALevelSequenceActor* OutActor = nullptr;
-        SequencePlayer = ULevelSequencePlayer::CreateLevelSequencePlayer(GetWorld(), Seq, Settings, OutActor);
-        SequenceActor  = OutActor;
-        if (SequencePlayer) SequencePlayer->Play();
+        SequencePlayer->Play();
+    }
+    else
+    {
+        ULevelSequence* Seq = PendingSequence.LoadSynchronous();
+        if (IsValid(Seq))
+        {
+            FMovieSceneSequencePlaybackSettings Settings;
+            Settings.bAutoPlay = true;
+            ALevelSequenceActor* OutActor = nullptr;
+            SequencePlayer = ULevelSequencePlayer::CreateLevelSequencePlayer(GetWorld(), Seq, Settings, OutActor);
+            SequenceActor  = OutActor;
+            if (SequencePlayer) SequencePlayer->Play();
+        }
     }
 
     PendingCamera = nullptr;

@@ -9,7 +9,13 @@ public class QZoom : ModuleRules
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core", "CoreUObject", "Engine", "InputCore",
-            "DisplayCluster", "LevelSequence", "MovieScene", "CinematicCamera"
+            "DisplayCluster", "LevelSequence", "MovieScene", "CinematicCamera",
+            "UMG"
+        });
+
+        PrivateDependencyModuleNames.AddRange(new string[]
+        {
+            "Slate", "SlateCore", "RHI", "Json", "AefPharus"
         });
     }
 }
