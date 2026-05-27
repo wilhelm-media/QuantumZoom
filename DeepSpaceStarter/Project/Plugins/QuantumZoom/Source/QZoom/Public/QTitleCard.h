@@ -13,6 +13,16 @@ public:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
+	FText Title    = FText::FromString(TEXT("QUANTUM ZOOM"));
+	FText Subtitle = FText::FromString(TEXT("ARS ELECTRONICA DEEP SPACE 8K"));
+
+	bool bShowBackground = true;
+	bool bShowText       = true;
+
+	FLinearColor BackgroundColor = FLinearColor(0.0f, 0.01f, 0.06f, 1.f);
+	FLinearColor TitleColor      = FLinearColor(0.85f, 0.95f, 1.f, 1.f);
+	FLinearColor SubtitleColor   = FLinearColor(0.4f, 0.6f, 0.8f, 1.f);
+
 private:
 	float Elapsed = 0.f;
 

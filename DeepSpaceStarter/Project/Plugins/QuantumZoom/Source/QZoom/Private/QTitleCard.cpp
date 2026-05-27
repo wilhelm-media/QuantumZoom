@@ -9,38 +9,46 @@ TSharedRef<SWidget> UQTitleCard::RebuildWidget()
 	const FSlateFontInfo TitleFont = FCoreStyle::GetDefaultFontStyle("Bold", 96);
 	const FSlateFontInfo SubFont   = FCoreStyle::GetDefaultFontStyle("Regular", 24);
 
+	TSharedRef<SVerticalBox> Content = SNew(SVerticalBox);
+
+	if (bShowText)
+	{
+		Content->AddSlot()
+		.AutoHeight()
+		.HAlign(HAlign_Center)
+		[
+			SNew(STextBlock)
+			.Font(TitleFont)
+			.Text(Title)
+			.ColorAndOpacity(TitleColor)
+			.Justification(ETextJustify::Center)
+		];
+
+		Content->AddSlot()
+		.AutoHeight()
+		.HAlign(HAlign_Center)
+		.Padding(FMargin(0.f, 18.f, 0.f, 0.f))
+		[
+			SNew(STextBlock)
+			.Font(SubFont)
+			.Text(Subtitle)
+			.ColorAndOpacity(SubtitleColor)
+			.Justification(ETextJustify::Center)
+		];
+	}
+
+	// Transparent background when bShowBackground == false (alpha 0)
+	const FLinearColor BgEff = bShowBackground
+		? BackgroundColor
+		: FLinearColor(0.f, 0.f, 0.f, 0.f);
+
 	return SNew(SBorder)
 		.BorderImage(FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox")))
-		.BorderBackgroundColor(FLinearColor(0.0f, 0.01f, 0.06f, 1.f))
+		.BorderBackgroundColor(BgEff)
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
 		.Padding(0.f)
-		[
-			SNew(SVerticalBox)
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			[
-				SNew(STextBlock)
-				.Font(TitleFont)
-				.Text(FText::FromString(TEXT("QUANTUM ZOOM")))
-				.ColorAndOpacity(FLinearColor(0.85f, 0.95f, 1.f, 1.f))
-				.Justification(ETextJustify::Center)
-			]
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			.HAlign(HAlign_Center)
-			.Padding(FMargin(0.f, 18.f, 0.f, 0.f))
-			[
-				SNew(STextBlock)
-				.Font(SubFont)
-				.Text(FText::FromString(TEXT("ARS ELECTRONICA DEEP SPACE 8K")))
-				.ColorAndOpacity(FLinearColor(0.4f, 0.6f, 0.8f, 1.f))
-				.Justification(ETextJustify::Center)
-			]
-		];
+		[ Content ];
 }
 
 void UQTitleCard::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)

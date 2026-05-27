@@ -98,7 +98,7 @@ void AQZoomTest::Tick(float DeltaTime)
             BroadcastDCRATransform(ActiveCamera->GetActorLocation(), ActiveCamera->GetActorQuat());
         }
     }
-    else
+    else if (!AQPerfMonitor::bIsOverlayCapturingInput)
     {
         APlayerController* PC = GetWorld()->GetFirstPlayerController();
         const bool bFreeFlight = PC && PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftTriggerAxis) > 0.1f;
@@ -108,12 +108,21 @@ void AQZoomTest::Tick(float DeltaTime)
     HandleDPadInput();
 
     // Component-based SetAudioListenerOverride is unreliable in nDisplay standalone mode.
-    // Push the listener position explicitly every frame so spatialization tracks DCRA.
+    // Push the listener position explicitly every frame.
     if (IsValid(DCRA))
     {
         if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
         {
-            PC->SetAudioListenerOverride(nullptr, DCRA->GetActorLocation(), DCRA->GetActorRotation());
+            FVector  ListenerLoc = bLockAudioToHome ? ZoomHomeTransform.GetLocation()           : DCRA->GetActorLocation();
+            FRotator ListenerRot = bLockAudioToHome ? ZoomHomeTransform.GetRotation().Rotator() : DCRA->GetActorRotation();
+
+            // Sanitize: reject NaN/inf and clamp rotation values so the spatializer never
+            // receives garbage during/after free flight accumulation.
+            if (ListenerLoc.ContainsNaN()) ListenerLoc = FVector::ZeroVector;
+            if (ListenerRot.ContainsNaN()) ListenerRot = FRotator::ZeroRotator;
+            ListenerRot.Normalize();
+
+            PC->SetAudioListenerOverride(nullptr, ListenerLoc, ListenerRot);
         }
     }
 }
@@ -170,6 +179,8 @@ void AQZoomTest::ApplyDCRATransform(const FVector& Loc, const FQuat& Rot)
 
 void AQZoomTest::HandleZoom(float DeltaTime)
 {
+    if (AQPerfMonitor::bIsOverlayCapturingInput) return;
+
     APlayerController* PC = GetWorld()->GetFirstPlayerController();
     if (!PC) return;
 
@@ -186,13 +197,22 @@ void AQZoomTest::HandleZoom(float DeltaTime)
 
 void AQZoomTest::HandleFreeMovement(float DeltaTime)
 {
+    if (AQPerfMonitor::bIsOverlayCapturingInput) return;
+
     APlayerController* PC = GetWorld()->GetFirstPlayerController();
     if (!PC || !DCRA) return;
 
-    const float LX = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX);   // strafe
-    const float LY = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY);   // forward
-    const float RX = PC->GetInputAnalogKeyState(EKeys::Gamepad_RightX);  // yaw
-    const float RY = PC->GetInputAnalogKeyState(EKeys::Gamepad_RightY);  // up/down
+    // Deadzone — stops stick drift from continuously feeding rotation/position deltas,
+    // which would slowly de-normalize DCRA's quaternion and corrupt the audio listener orientation.
+    auto Deadzone = [](float V) -> float
+    {
+        return FMath::Abs(V) < 0.15f ? 0.f : V;
+    };
+
+    const float LX = Deadzone(PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX));   // strafe
+    const float LY = Deadzone(PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY));   // forward
+    const float RX = Deadzone(PC->GetInputAnalogKeyState(EKeys::Gamepad_RightX));  // yaw
+    const float RY = Deadzone(PC->GetInputAnalogKeyState(EKeys::Gamepad_RightY));  // up/down
 
     const FTransform T = DCRA->GetActorTransform();
     const FVector Forward = T.GetRotation().GetForwardVector();
@@ -206,6 +226,7 @@ void AQZoomTest::HandleFreeMovement(float DeltaTime)
 
     FQuat NewRot = T.GetRotation() *
         FQuat(FVector::UpVector, FMath::DegreesToRadians(RX * FreeRotateSpeed * DeltaTime));
+    NewRot.Normalize();  // prevent drift from breaking audio listener orientation
 
     BroadcastDCRATransform(NewLoc, NewRot);
 }
@@ -292,6 +313,13 @@ void AQZoomTest::StartReturnToZoom()
     StopActiveSequence();
     ActiveCamera        = nullptr;
 
+    // Audio reset — sequences can leave the listener override in a bad state.
+    // Clear it; the per-tick push in Tick() re-applies a clean override next frame.
+    if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+    {
+        PC->ClearAudioListenerOverride();
+    }
+
     TransitionStart     = DCRA->GetActorTransform();
     TransitionEnd       = ZoomHomeTransform;
     TransitionAlpha     = 0.f;
@@ -299,7 +327,7 @@ void AQZoomTest::StartReturnToZoom()
     bIsReturnTransition = true;
     bInCinematicMode    = false;
 
-    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Returning to ZoomCam"));
+    UE_LOG(LogTemp, Log, TEXT("[QZoomTest] Returning to ZoomCam — audio listener reset"));
 }
 
 void AQZoomTest::ResetToHome()
@@ -369,6 +397,16 @@ void AQZoomTest::CompleteTransition()
             SequencePlayer = ULevelSequencePlayer::CreateLevelSequencePlayer(GetWorld(), Seq, Settings, OutActor);
             SequenceActor  = OutActor;
             if (SequencePlayer) SequencePlayer->Play();
+        }
+    }
+
+    // Defensive re-apply: LevelSequence CameraCut can change ViewTarget and reset
+    // audio listener handling. Force the listener back onto DCRA immediately after Play().
+    if (IsValid(DCRA))
+    {
+        if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+        {
+            PC->SetAudioListenerOverride(nullptr, DCRA->GetActorLocation(), DCRA->GetActorRotation());
         }
     }
 

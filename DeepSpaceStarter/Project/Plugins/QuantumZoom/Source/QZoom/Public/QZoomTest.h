@@ -51,6 +51,12 @@ public:
     UPROPERTY(EditAnywhere, Category="QZoom|Zoom")
     FTransform ZoomHomeTransform;
 
+    /** When true, audio listener stays at ZoomHomeTransform regardless of camera movement.
+     *  Use this if free flight pushes the camera so far that spatialized sounds attenuate
+     *  to silence. Cinematic sequences will also use the home pose for audio when enabled. */
+    UPROPERTY(EditAnywhere, Category="QZoom|Audio")
+    bool bLockAudioToHome = false;
+
     // --- Sequences ---
 
     UPROPERTY(EditAnywhere, Category="QZoom|Sequences")

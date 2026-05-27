@@ -7,8 +7,8 @@
 
 TSharedRef<SWidget> UQPerfWidget::RebuildWidget()
 {
-	const FSlateFontInfo Font     = FCoreStyle::GetDefaultFontStyle("Regular", 11);
-	const FSlateFontInfo BoldFont = FCoreStyle::GetDefaultFontStyle("Bold", 11);
+	const FSlateFontInfo Font     = FCoreStyle::GetDefaultFontStyle("Regular", 18);
+	const FSlateFontInfo BoldFont = FCoreStyle::GetDefaultFontStyle("Bold", 20);
 
 	TSharedRef<SVerticalBox> Content = SNew(SVerticalBox);
 
@@ -31,6 +31,18 @@ TSharedRef<SWidget> UQPerfWidget::RebuildWidget()
 			.Font(Font)
 			.ColorAndOpacity(FLinearColor::Transparent)
 		]
+	];
+
+	// ── Restart prompt (only visible while active) ──────────────────────────
+	Content->AddSlot()
+	.AutoHeight()
+	.HAlign(HAlign_Center)
+	.Padding(FMargin(0.f, 0.f, 0.f, 8.f))
+	[
+		SAssignNew(RestartPromptText, STextBlock)
+		.Font(BoldFont)
+		.ColorAndOpacity(FLinearColor(1.f, 0.4f, 0.3f))
+		.Visibility(EVisibility::Collapsed)
 	];
 
 	// ── Metric rows ──────────────────────────────────────────────────────────
@@ -58,12 +70,19 @@ TSharedRef<SWidget> UQPerfWidget::RebuildWidget()
 	};
 
 	AddMetricRow(TEXT("FPS"),    FpsText);
+	AddMetricRow(TEXT("Game"),   GameText);
+	AddMetricRow(TEXT("Draw"),   DrawText);
+	AddMetricRow(TEXT("RHI"),    RhiText);
 	AddMetricRow(TEXT("GPU"),    GpuText);
 	AddMetricRow(TEXT("RAM"),    RamText);
-	AddMetricRow(TEXT("GC"),     GcText);
-	AddMetricRow(TEXT("GC Int"), GcIntText);
-	AddMetricRow(TEXT("Shader"), ShaderText);
-	AddMetricRow(TEXT("Pharus"), PharusStatusText);
+	AddMetricRow(TEXT("GC"),       GcText);
+	AddMetricRow(TEXT("GC Int"),   GcIntText);
+	AddMetricRow(TEXT("Shader"),   ShaderText);
+	AddMetricRow(TEXT("Niagara"),  NiagaraText);
+	AddMetricRow(TEXT("Stutter"),  StutterText);
+	AddMetricRow(TEXT("Tick"),     TickText);
+	AddMetricRow(TEXT("Cluster"),  ClusterText);
+	AddMetricRow(TEXT("Pharus"),   PharusStatusText);
 
 	auto AddDivider = [&]()
 	{
@@ -82,55 +101,88 @@ TSharedRef<SWidget> UQPerfWidget::RebuildWidget()
 	// ── Divider ───────────────────────────────────────────────────────────────
 	AddDivider();
 
-	// ── Menu rows (D-Pad navigable) ───────────────────────────────────────────
+	// ── Page badge (LB/RB switches pages) ─────────────────────────────────────
 	Content->AddSlot()
 	.AutoHeight()
-	.Padding(FMargin(0.f, 2.f))
+	.Padding(FMargin(0.f, 0.f, 0.f, 4.f))
 	[
-		SAssignNew(ExportMenuText, STextBlock)
-		.Font(Font)
-		.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
-		.Text(FText::FromString(TEXT(">  EXPORT   OFF")))
-	];
-
-	Content->AddSlot()
-	.AutoHeight()
-	.Padding(FMargin(18.f, 0.f, 0.f, 2.f))
-	[
-		SAssignNew(ExportPathText, STextBlock)
-		.Font(FCoreStyle::GetDefaultFontStyle("Regular", 9))
-		.ColorAndOpacity(FLinearColor(0.45f, 0.45f, 0.45f))
-		.Visibility(EVisibility::Collapsed)
-	];
-
-	Content->AddSlot()
-	.AutoHeight()
-	.Padding(FMargin(0.f, 2.f))
-	[
-		SAssignNew(PharusToggleMenuText, STextBlock)
-		.Font(Font)
-		.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
-		.Text(FText::FromString(TEXT("   PHARUS   ○ OFF")))
-	];
-
-	Content->AddSlot()
-	.AutoHeight()
-	.Padding(FMargin(0.f, 2.f))
-	[
-		SAssignNew(PharusMenuText, STextBlock)
-		.Font(Font)
-		.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
-		.Text(FText::FromString(TEXT("   PHARUS   OFF")))
-	];
-
-	Content->AddSlot()
-	.AutoHeight()
-	.Padding(FMargin(0.f, 4.f, 0.f, 2.f))
-	[
-		SAssignNew(StartTrackingMenuText, STextBlock)
+		SAssignNew(PageBadge, STextBlock)
 		.Font(BoldFont)
-		.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
-		.Text(FText::FromString(TEXT("   START TRACKING")))
+		.ColorAndOpacity(FLinearColor(0.55f, 0.75f, 1.f))
+		.Text(FText::FromString(TEXT("◀ LB     TRACKING  [1/2]     RB ▶")))
+	];
+
+	// ── Tracking page ─────────────────────────────────────────────────────────
+	Content->AddSlot()
+	.AutoHeight()
+	[
+		SAssignNew(TrackingPageBox, SVerticalBox)
+
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 0.f, 0.f, 6.f))
+		[
+			SAssignNew(SoundDistText, STextBlock).Font(Font)
+			.ColorAndOpacity(FLinearColor(0.55f, 0.85f, 1.f))
+		]
+
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 2.f))
+		[
+			SAssignNew(ExportMenuText, STextBlock).Font(Font)
+			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
+			.Text(FText::FromString(TEXT(">  EXPORT   OFF")))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(18.f, 0.f, 0.f, 2.f))
+		[
+			SAssignNew(ExportPathText, STextBlock)
+			.Font(FCoreStyle::GetDefaultFontStyle("Regular", 12))
+			.ColorAndOpacity(FLinearColor(0.45f, 0.45f, 0.45f))
+			.Visibility(EVisibility::Collapsed)
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 2.f))
+		[
+			SAssignNew(PharusToggleMenuText, STextBlock).Font(Font)
+			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
+			.Text(FText::FromString(TEXT("   PHARUS   ○ OFF")))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 2.f))
+		[
+			SAssignNew(PharusMenuText, STextBlock).Font(Font)
+			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
+			.Text(FText::FromString(TEXT("   PHARUS   OFF")))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 4.f, 0.f, 2.f))
+		[
+			SAssignNew(StartTrackingMenuText, STextBlock).Font(BoldFont)
+			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
+			.Text(FText::FromString(TEXT("   START TRACKING")))
+		]
+		+ SVerticalBox::Slot().AutoHeight().Padding(FMargin(0.f, 2.f))
+		[
+			SAssignNew(TestCubeMenuText, STextBlock).Font(Font)
+			.ColorAndOpacity(FLinearColor(0.55f, 0.55f, 0.55f))
+			.Text(FText::FromString(TEXT("   TEST CUBE   OFF")))
+		]
+	];
+
+	// ── Niagara page ──────────────────────────────────────────────────────────
+	const FMargin RowPad(0.f, 2.f);
+	const FLinearColor RowGrey(0.55f, 0.55f, 0.55f);
+
+	Content->AddSlot().AutoHeight()
+	[
+		SAssignNew(NiagaraPageBox, SVerticalBox)
+			.Visibility(EVisibility::Collapsed)
+		+ SVerticalBox::Slot().AutoHeight().Padding(RowPad)
+		[ SAssignNew(NiaActiveText,    STextBlock).Font(Font).ColorAndOpacity(RowGrey) ]
+		+ SVerticalBox::Slot().AutoHeight().Padding(RowPad)
+		[ SAssignNew(NiaIntensityText, STextBlock).Font(Font).ColorAndOpacity(RowGrey) ]
+		+ SVerticalBox::Slot().AutoHeight().Padding(RowPad)
+		[ SAssignNew(NiaSpawnText,     STextBlock).Font(Font).ColorAndOpacity(RowGrey) ]
+		+ SVerticalBox::Slot().AutoHeight().Padding(RowPad)
+		[ SAssignNew(NiaLifetimeText,  STextBlock).Font(Font).ColorAndOpacity(RowGrey) ]
+		+ SVerticalBox::Slot().AutoHeight().Padding(RowPad)
+		[ SAssignNew(NiaSpriteText,    STextBlock).Font(Font).ColorAndOpacity(RowGrey) ]
+		+ SVerticalBox::Slot().AutoHeight().Padding(RowPad)
+		[ SAssignNew(NiaRadiusText,    STextBlock).Font(Font).ColorAndOpacity(RowGrey) ]
 	];
 
 	// ── Divider ───────────────────────────────────────────────────────────────
@@ -146,29 +198,88 @@ TSharedRef<SWidget> UQPerfWidget::RebuildWidget()
 		.Visibility(EVisibility::Collapsed)
 	];
 
-	return SNew(SBorder)
+	TSharedRef<SBorder> Panel = SNew(SBorder)
 		.BorderImage(FCoreStyle::Get().GetBrush(TEXT("GenericWhiteBox")))
 		.BorderBackgroundColor(FLinearColor(0.04f, 0.04f, 0.04f, 0.88f))
 		.Padding(FMargin(14.f))
 		[Content];
+
+	// Center horizontally and vertically in viewport
+	return SNew(SVerticalBox)
+	+ SVerticalBox::Slot()
+	.FillHeight(1.f)
+	.HAlign(HAlign_Center)
+	.VAlign(VAlign_Center)
+	[
+		SNew(SBox).WidthOverride(720.f) [ Panel ]
+	];
 }
 
-void UQPerfWidget::UpdateStats(float Fps, float FtMs, float GpuMs, float RamMb,
+void UQPerfWidget::UpdateStats(float Fps, float FtMs,
+                                float GameMs, float DrawMs, float RhiMs, float GpuMs,
+                                float TickMs, float ClusterLagMs,
+                                float RamMb,
                                 int32 GcEvents, float GcInterval, int32 ShaderJobs,
+                                int32 NiagaraActive, int32 NiagaraEmitters,
+                                int32 StuttersInWindow, float StutterIntervalAvg, bool bStutterThisFrame,
                                 bool bPharusRunning, int32 ActivePharusTracks,
                                 bool bTracking, float CountdownSecs,
                                 const FString& ExportMsg,
-                                int32 MenuSelection, bool bExportEnabled, bool bPausePharus,
-                                const FString& ExportPathDisplay)
+                                int32 MenuPage, int32 MenuSelection,
+                                bool bExportEnabled, bool bPausePharus, bool bTestCubeActive,
+                                const FString& ExportPathDisplay,
+                                const FQNiagaraDisplay& Niagara,
+                                const FString& SoundDistStr,
+                                bool bRestartPromptActive, float RestartPromptRemaining)
 {
+	// Page switching — show one page, hide the other
+	if (TrackingPageBox.IsValid())
+		TrackingPageBox->SetVisibility(MenuPage == 0 ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed);
+	if (NiagaraPageBox.IsValid())
+		NiagaraPageBox->SetVisibility(MenuPage == 1 ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed);
+	if (PageBadge.IsValid())
+	{
+		const FString PageLabel = (MenuPage == 0) ? TEXT("TRACKING  [1/2]") : TEXT("NIAGARA  [2/2]");
+		PageBadge->SetText(FText::FromString(FString::Printf(TEXT("◀ LB     %s     RB ▶"), *PageLabel)));
+	}
+
+	// Highlight thread times that exceed 16.7ms (60fps budget)
+	auto ThreadColor = [](float Ms) -> FLinearColor
+	{
+		if (Ms > 16.7f) return FLinearColor(0.95f, 0.35f, 0.25f); // red — over budget
+		if (Ms > 12.0f) return FLinearColor(0.95f, 0.80f, 0.30f); // amber — close
+		return FLinearColor(0.88f, 0.88f, 0.88f);                  // normal
+	};
+
 	// Metrics
 	if (FpsText.IsValid())
 		FpsText->SetText(FText::FromString(FString::Printf(TEXT("%.1f fps  /  %.1f ms"), Fps, FtMs)));
 
+	if (GameText.IsValid())
+	{
+		GameText->SetText(FText::FromString(FString::Printf(TEXT("%.1f ms"), GameMs)));
+		GameText->SetColorAndOpacity(ThreadColor(GameMs));
+	}
+
+	if (DrawText.IsValid())
+	{
+		DrawText->SetText(FText::FromString(FString::Printf(TEXT("%.1f ms"), DrawMs)));
+		DrawText->SetColorAndOpacity(ThreadColor(DrawMs));
+	}
+
+	if (RhiText.IsValid())
+	{
+		RhiText->SetText(FText::FromString(FString::Printf(TEXT("%.1f ms"), RhiMs)));
+		RhiText->SetColorAndOpacity(ThreadColor(RhiMs));
+	}
+
 	if (GpuText.IsValid())
+	{
 		GpuText->SetText(FText::FromString(GpuMs > 0.f
 			? FString::Printf(TEXT("%.1f ms"), GpuMs)
 			: TEXT("N/A")));
+		GpuText->SetColorAndOpacity(ThreadColor(GpuMs));
+	}
 
 	if (RamText.IsValid())
 		RamText->SetText(FText::FromString(FString::Printf(TEXT("%.0f MB"), RamMb)));
@@ -185,6 +296,43 @@ void UQPerfWidget::UpdateStats(float Fps, float FtMs, float GpuMs, float RamMb,
 
 	if (ShaderText.IsValid())
 		ShaderText->SetText(FText::FromString(FString::Printf(TEXT("%d pending"), ShaderJobs)));
+
+	if (NiagaraText.IsValid())
+		NiagaraText->SetText(FText::FromString(NiagaraActive > 0
+			? FString::Printf(TEXT("%d active  /  %d emitters"), NiagaraActive, NiagaraEmitters)
+			: TEXT("none active")));
+
+	if (StutterText.IsValid())
+	{
+		const FString StutterStr = StutterIntervalAvg > 0.f
+			? FString::Printf(TEXT("%d in 5s  ·  Δ %.2fs"), StuttersInWindow, StutterIntervalAvg)
+			: FString::Printf(TEXT("%d in 5s"), StuttersInWindow);
+		StutterText->SetText(FText::FromString(StutterStr));
+		// Red while a stutter is happening this frame, amber if recent stutters, normal otherwise
+		StutterText->SetColorAndOpacity(bStutterThisFrame
+			? FLinearColor(0.95f, 0.25f, 0.25f)
+			: (StuttersInWindow > 0 ? FLinearColor(0.95f, 0.80f, 0.30f) : FLinearColor(0.88f, 0.88f, 0.88f)));
+	}
+
+	if (TickText.IsValid())
+	{
+		TickText->SetText(FText::FromString(FString::Printf(TEXT("%.1f ms"), TickMs)));
+		// Wall-clock tick: same thresholds as thread times — anything over 50 = stall
+		TickText->SetColorAndOpacity(
+			TickMs > 50.f  ? FLinearColor(0.95f, 0.25f, 0.25f) :
+			TickMs > 20.f  ? FLinearColor(0.95f, 0.80f, 0.30f) :
+			                 FLinearColor(0.88f, 0.88f, 0.88f));
+	}
+
+	if (ClusterText.IsValid())
+	{
+		ClusterText->SetText(FText::FromString(FString::Printf(TEXT("%.2f ms"), ClusterLagMs)));
+		// Cluster lag: healthy < 5 ms, amber 5–50, red > 50 (sync stall)
+		ClusterText->SetColorAndOpacity(
+			ClusterLagMs > 50.f ? FLinearColor(0.95f, 0.25f, 0.25f) :
+			ClusterLagMs >  5.f ? FLinearColor(0.95f, 0.80f, 0.30f) :
+			                      FLinearColor(0.88f, 0.88f, 0.88f));
+	}
 
 	if (PharusStatusText.IsValid())
 	{
@@ -286,6 +434,36 @@ void UQPerfWidget::UpdateStats(float Fps, float FtMs, float GpuMs, float RamMb,
 		}
 	}
 
+	if (TestCubeMenuText.IsValid())
+	{
+		const bool bSel = MenuSelection == 4;
+		TestCubeMenuText->SetText(FText::FromString(FString::Printf(
+			TEXT("%s  TEST CUBE   %s"),
+			bSel ? TEXT(">") : TEXT(" "),
+			bTestCubeActive ? TEXT("ON") : TEXT("OFF"))));
+		TestCubeMenuText->SetColorAndOpacity(bTestCubeActive ? OnOffColor(true) : MenuColor(bSel));
+	}
+
+	if (SoundDistText.IsValid())
+	{
+		SoundDistText->SetText(FText::FromString(SoundDistStr));
+	}
+
+	if (RestartPromptText.IsValid())
+	{
+		if (bRestartPromptActive)
+		{
+			RestartPromptText->SetText(FText::FromString(FString::Printf(
+				TEXT("RESTART?   PRESS  B  TO CONFIRM   ( %.1fs )"),
+				FMath::Max(0.f, RestartPromptRemaining))));
+			RestartPromptText->SetVisibility(EVisibility::SelfHitTestInvisible);
+		}
+		else
+		{
+			RestartPromptText->SetVisibility(EVisibility::Collapsed);
+		}
+	}
+
 	// Status row — countdown during tracking, export result after, empty otherwise
 	if (StatusText.IsValid())
 	{
@@ -300,4 +478,38 @@ void UQPerfWidget::UpdateStats(float Fps, float FtMs, float GpuMs, float RamMb,
 			StatusText->SetVisibility(EVisibility::Collapsed);
 		}
 	}
+
+	// ── Niagara page rendering ──────────────────────────────────────────────
+	const int32 NiaSel = (MenuPage == 1) ? MenuSelection : -1;
+	auto CursorAt = [NiaSel](int32 Idx) -> const TCHAR*
+	{
+		return NiaSel == Idx ? TEXT(">") : TEXT(" ");
+	};
+
+	if (NiaActiveText.IsValid())
+	{
+		const bool bSel = NiaSel == 0;
+		const FString Line = !Niagara.bAvailable
+			? FString(TEXT("   no QNiagaraController in level"))
+			: FString::Printf(TEXT("%s  ACTIVE        %s"),
+				CursorAt(0), Niagara.bActive ? TEXT("ON") : TEXT("OFF"));
+		NiaActiveText->SetText(FText::FromString(Line));
+		NiaActiveText->SetColorAndOpacity(Niagara.bActive
+			? OnOffColor(true) : MenuColor(bSel));
+	}
+
+	auto RenderRow = [&](TSharedPtr<STextBlock>& Out, const TCHAR* Label, int32 Idx, const FString& ValueStr)
+	{
+		if (!Out.IsValid()) return;
+		const bool bSel = NiaSel == Idx;
+		Out->SetText(FText::FromString(FString::Printf(TEXT("%s  %-12s  %s"),
+			CursorAt(Idx), Label, *ValueStr)));
+		Out->SetColorAndOpacity(MenuColor(bSel));
+	};
+
+	RenderRow(NiaIntensityText, TEXT("INTENSITY"), 1, FString::Printf(TEXT("%.0f"),  Niagara.VectorFieldIntensity));
+	RenderRow(NiaSpawnText,     TEXT("SPAWN"),     2, FString::Printf(TEXT("%.0f"),  Niagara.SpawnRate));
+	RenderRow(NiaLifetimeText,  TEXT("LIFETIME"),  3, FString::Printf(TEXT("%.1fs"), Niagara.Lifetime));
+	RenderRow(NiaSpriteText,    TEXT("SIZE"),      4, FString::Printf(TEXT("%.2f"),  Niagara.SpriteSize));
+	RenderRow(NiaRadiusText,    TEXT("RADIUS"),    5, FString::Printf(TEXT("%.0f"),  Niagara.EmitterRadius));
 }

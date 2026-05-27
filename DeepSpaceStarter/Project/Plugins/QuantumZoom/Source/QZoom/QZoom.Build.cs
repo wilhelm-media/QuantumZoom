@@ -15,7 +15,7 @@ public class QZoom : ModuleRules
 
         PrivateDependencyModuleNames.AddRange(new string[]
         {
-            "Slate", "SlateCore", "RHI", "Json", "AefPharus"
+            "Slate", "SlateCore", "RHI", "RenderCore", "Json", "AefPharus", "Niagara"
         });
     }
 }
