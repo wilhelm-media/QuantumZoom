@@ -45,6 +45,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="QTitleCard|Colors")
 	FLinearColor SubtitleColor = FLinearColor(0.4f, 0.6f, 0.8f, 1.f);
 
+	/** Color the background fades FROM at t=0. Default opaque black — keeps scene invisible at start. */
+	UPROPERTY(EditAnywhere, Category="QTitleCard|Colors")
+	FLinearColor StartColor = FLinearColor(0.f, 0.f, 0.f, 1.f);
+
 private:
 	UPROPERTY()
 	TObjectPtr<UQTitleCard> TitleWidget;

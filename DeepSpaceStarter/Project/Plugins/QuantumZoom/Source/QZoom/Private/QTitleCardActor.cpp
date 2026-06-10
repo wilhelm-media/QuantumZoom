@@ -27,6 +27,7 @@ void AQTitleCardActor::BeginPlay()
 			TitleWidget->BackgroundColor = BackgroundColor;
 			TitleWidget->TitleColor      = TitleColor;
 			TitleWidget->SubtitleColor   = SubtitleColor;
+			TitleWidget->StartColor      = StartColor;
 			TitleWidget->AddToViewport(99);
 		}
 	}
