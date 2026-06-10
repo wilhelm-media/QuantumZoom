@@ -4,6 +4,12 @@ DerivedDataCache/
 Intermediate/
 Saved/
 
+# Packaged / staged build output (cooked builds — never commit, ~1.8GB)
+Project/Windows/
+Project/Linux/
+Project/Mac/
+Project/Saved/StagedBuilds/
+
 # Project-level Binaries (regenerated on build)
 Project/Binaries/
 
