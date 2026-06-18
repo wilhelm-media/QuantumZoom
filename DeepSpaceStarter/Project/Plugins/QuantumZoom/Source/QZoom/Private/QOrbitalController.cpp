@@ -7,6 +7,8 @@
 #include "Engine/Engine.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
+#include "Blueprint/UserWidget.h"
+#include "QOrbitalHUD.h"
 
 const FString AQOrbitalController::ClusterEventName = TEXT("QOrbital.Param");
 
@@ -284,6 +286,7 @@ void AQOrbitalController::HandleGamepadInput(float Dt)
 	if (!bMode)
 	{
 		bPrevNext = bPrevPrev = bPrevReset = false;   // clear edges so nothing queues while inactive
+		if (OrbitalHUD) OrbitalHUD->SetVisibility(ESlateVisibility::Collapsed);
 		return;
 	}
 
@@ -317,12 +320,22 @@ void AQOrbitalController::HandleGamepadInput(float Dt)
 			NudgeColor(SelectedParam, LX * 360.f * GamepadAdjustRate * Dt, LY * GamepadAdjustRate * Dt);
 	}
 
-	// Operator HUD (primary node / wall — acceptable for a test slot)
-	if (bShowGamepadHUD && GEngine)
+	// Operator HUD — real Slate widget (NOT AddOnScreenDebugMessage, which the cluster
+	// suppresses via DisableAllScreenMessages). Created lazily on the primary node.
+	if (bShowGamepadHUD)
 	{
-		const FString Msg = FString::Printf(TEXT("[ORBITAL]  %d/%d   %s   (B/X cycle - LStick adjust - RStick reset)"),
-			SelectedParam + 1, NumParams(), *ParamDisplay(SelectedParam));
-		GEngine->AddOnScreenDebugMessage(770001, 0.25f, FColor::Cyan, Msg);
+		if (!OrbitalHUD)
+		{
+			OrbitalHUD = CreateWidget<UQOrbitalHUD>(PC, UQOrbitalHUD::StaticClass());
+			if (OrbitalHUD) OrbitalHUD->AddToViewport(100);
+		}
+		if (OrbitalHUD)
+		{
+			OrbitalHUD->SetVisibility(ESlateVisibility::HitTestInvisible);
+			OrbitalHUD->SetReadout(
+				FString::Printf(TEXT("ORBITAL   %d / %d"), SelectedParam + 1, NumParams()),
+				ParamDisplay(SelectedParam));
+		}
 	}
 }
 

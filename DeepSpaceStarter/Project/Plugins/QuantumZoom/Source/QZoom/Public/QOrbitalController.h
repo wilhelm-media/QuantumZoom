@@ -7,6 +7,7 @@
 #include "QOrbitalController.generated.h"
 
 class UNiagaraComponent;
+class UQOrbitalHUD;
 
 /**
  * QOrbitalController
@@ -154,6 +155,9 @@ private:
 	void ApplyActive(bool bNewActive);
 
 	// ── Gamepad live control (primary node only) ──
+	UPROPERTY()
+	TObjectPtr<UQOrbitalHUD> OrbitalHUD = nullptr;   // Slate operator readout (created lazily on primary)
+
 	int32 SelectedParam = 0;
 	bool bPrevNext  = false;   // B  edge-detect (next param)
 	bool bPrevPrev  = false;   // X  edge-detect (prev param)
