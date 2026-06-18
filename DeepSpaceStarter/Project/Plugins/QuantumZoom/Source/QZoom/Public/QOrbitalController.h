@@ -100,6 +100,21 @@ public:
 	float ColorEdgeEdge = 0.9f;
 
 	// ───────────────────────────────────────────────────────────────────────
+	// Gamepad live control (PRIMARY node only) — hold Right Trigger to enter
+	// "Orbital Mode": B/X cycle the selected param, Left Stick adjusts it
+	// (scalars: X = value; colors: X = hue, Y = brightness), R-Stick click resets.
+	// Adjustments broadcast via cluster events, so Wall/Floor stay in sync.
+	// ───────────────────────────────────────────────────────────────────────
+
+	/** Per-second fraction of a param's full range traversed at full stick deflection (0.25 = ~4s sweep). */
+	UPROPERTY(EditAnywhere, Category="QOrbital|Gamepad", meta=(ClampMin="0.05", ClampMax="2.0"))
+	float GamepadAdjustRate = 0.25f;
+
+	/** Show the on-screen operator HUD (selected param + value) while Right Trigger is held. */
+	UPROPERTY(EditAnywhere, Category="QOrbital|Gamepad")
+	bool bShowGamepadHUD = true;
+
+	// ───────────────────────────────────────────────────────────────────────
 	// API
 	// ───────────────────────────────────────────────────────────────────────
 
@@ -117,6 +132,7 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void Tick(float DeltaSeconds) override;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -136,4 +152,17 @@ private:
 	void ApplyFloat (const FString& ParamName, float Value);
 	void ApplyColor (const FString& ParamName, const FLinearColor& Value);
 	void ApplyActive(bool bNewActive);
+
+	// ── Gamepad live control (primary node only) ──
+	int32 SelectedParam = 0;
+	bool bPrevNext  = false;   // B  edge-detect (next param)
+	bool bPrevPrev  = false;   // X  edge-detect (prev param)
+	bool bPrevReset = false;   // R-stick click edge-detect (reset)
+
+	void HandleGamepadInput(float DeltaSeconds);
+	static int32 NumParams() { return 10; }
+	FString ParamDisplay(int32 Index) const;   // HUD line for the selected param
+	void NudgeScalar(int32 Index, float NormDelta);            // NormDelta = stick * DeltaSeconds
+	void NudgeColor (int32 Index, float DeltaHueDeg, float DeltaValue);
+	void ResetParamToDefault(int32 Index);
 };

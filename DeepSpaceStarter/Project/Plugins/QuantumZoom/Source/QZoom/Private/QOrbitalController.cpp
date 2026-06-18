@@ -4,12 +4,15 @@
 #include "Cluster/IDisplayClusterClusterManager.h"
 #include "EngineUtils.h"
 #include "UObject/UObjectIterator.h"
+#include "Engine/Engine.h"
+#include "GameFramework/PlayerController.h"
+#include "InputCoreTypes.h"
 
 const FString AQOrbitalController::ClusterEventName = TEXT("QOrbital.Param");
 
 AQOrbitalController::AQOrbitalController()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;   // gamepad polling (primary node only; early-outs otherwise)
 }
 
 UNiagaraComponent* AQOrbitalController::ResolveNiagaraComponent()
@@ -256,4 +259,137 @@ void AQOrbitalController::ApplyActive(bool bNewActive)
 	UE_LOG(LogTemp, Log, TEXT("[QOrbitalController] ApplyActive = %s"), bNewActive ? TEXT("true") : TEXT("false"));
 	if (bNewActive) NC->Activate();
 	else            NC->Deactivate();
+}
+
+// ─── Gamepad live control (primary node only) ──────────────────────────────────
+// Hold Right Trigger = "Orbital Mode". B/X cycle the selected param, Left Stick
+// adjusts it. All changes go through BroadcastFloat/BroadcastColor, so they sync
+// to every cluster node exactly like the editor PostEditChange path.
+
+void AQOrbitalController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (!bIsPrimary) return;             // only the operator's (primary) node reads the gamepad
+	HandleGamepadInput(DeltaSeconds);
+}
+
+void AQOrbitalController::HandleGamepadInput(float Dt)
+{
+	UWorld* W = GetWorld();
+	APlayerController* PC = W ? W->GetFirstPlayerController() : nullptr;
+	if (!PC) return;
+
+	// Modifier: Right Trigger held (mirrors QZoomTest's Left-Trigger = free-flight; mutually exclusive)
+	const bool bMode = PC->GetInputAnalogKeyState(EKeys::Gamepad_RightTriggerAxis) > 0.1f;
+	if (!bMode)
+	{
+		bPrevNext = bPrevPrev = bPrevReset = false;   // clear edges so nothing queues while inactive
+		return;
+	}
+
+	// Cycle selected param: B = next, X = prev (edge-detected)
+	const bool bNext = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Right);
+	const bool bPrev = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Left);
+	if (bNext && !bPrevNext) SelectedParam = (SelectedParam + 1) % NumParams();
+	if (bPrev && !bPrevPrev) SelectedParam = (SelectedParam + NumParams() - 1) % NumParams();
+	bPrevNext = bNext;
+	bPrevPrev = bPrev;
+
+	// Reset selected param to default: Right-Stick click (edge-detected)
+	const bool bReset = PC->IsInputKeyDown(EKeys::Gamepad_RightThumbstick);
+	if (bReset && !bPrevReset) ResetParamToDefault(SelectedParam);
+	bPrevReset = bReset;
+
+	// Adjust: Left Stick (deadzoned)
+	const float DZ = 0.15f;
+	float LX = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX);
+	float LY = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY);
+	LX = (FMath::Abs(LX) > DZ) ? LX : 0.f;
+	LY = (FMath::Abs(LY) > DZ) ? LY : 0.f;
+
+	if (SelectedParam <= 7)                       // scalar params: X = value
+	{
+		if (LX != 0.f) NudgeScalar(SelectedParam, LX * Dt);
+	}
+	else                                          // color params: X = hue, Y = brightness
+	{
+		if (LX != 0.f || LY != 0.f)
+			NudgeColor(SelectedParam, LX * 360.f * GamepadAdjustRate * Dt, LY * GamepadAdjustRate * Dt);
+	}
+
+	// Operator HUD (primary node / wall — acceptable for a test slot)
+	if (bShowGamepadHUD && GEngine)
+	{
+		const FString Msg = FString::Printf(TEXT("[ORBITAL]  %d/%d   %s   (B/X cycle - LStick adjust - RStick reset)"),
+			SelectedParam + 1, NumParams(), *ParamDisplay(SelectedParam));
+		GEngine->AddOnScreenDebugMessage(770001, 0.25f, FColor::Cyan, Msg);
+	}
+}
+
+void AQOrbitalController::NudgeScalar(int32 Index, float NormDelta)
+{
+	float* P = nullptr; float Lo = 0.f, Hi = 1.f; const TCHAR* Name = TEXT("");
+	switch (Index)
+	{
+		case 0: P = &Hybridization;  Lo = 0.f;  Hi = 3.f;     Name = TEXT("Hybridization");  break;
+		case 1: P = &CloudFuzziness; Lo = 0.f;  Hi = 1.f;     Name = TEXT("CloudFuzziness"); break;
+		case 2: P = &MaxRadius;      Lo = 50.f; Hi = 2000.f;  Name = TEXT("MaxRadius");      break;
+		case 3: P = &LayerGradient;  Lo = 0.f;  Hi = 200.f;   Name = TEXT("LayerGradient");  break;
+		case 4: P = &SwitchProgress; Lo = 0.f;  Hi = 1.f;     Name = TEXT("SwitchProgress"); break;
+		case 5: P = &SpawnDensity;   Lo = 0.f;  Hi = 50000.f; Name = TEXT("SpawnDensity");   break;
+		case 6: P = &ColorCoreEdge;  Lo = 0.f;  Hi = 1.f;     Name = TEXT("ColorCoreEdge");  break;
+		case 7: P = &ColorEdgeEdge;  Lo = 0.f;  Hi = 1.f;     Name = TEXT("ColorEdgeEdge");  break;
+		default: return;
+	}
+	const float Range = Hi - Lo;
+	*P = FMath::Clamp(*P + NormDelta * Range * GamepadAdjustRate, Lo, Hi);
+	BroadcastFloat(Name, *P);
+}
+
+void AQOrbitalController::NudgeColor(int32 Index, float DeltaHueDeg, float DeltaValue)
+{
+	FLinearColor* C = (Index == 8) ? &CoreColor : (Index == 9) ? &EdgeColor : nullptr;
+	if (!C) return;
+	FLinearColor HSV = C->LinearRGBToHSV();                 // R = Hue(0-360), G = Sat, B = Value
+	HSV.R = FMath::Fmod(HSV.R + DeltaHueDeg + 360.f, 360.f);
+	HSV.B = FMath::Clamp(HSV.B + DeltaValue, 0.f, 1.f);
+	const float SavedAlpha = C->A;
+	*C = HSV.HSVToLinearRGB();
+	C->A = SavedAlpha;                                      // preserve alpha (EdgeColor uses it)
+	BroadcastColor(Index == 8 ? TEXT("CoreColor") : TEXT("EdgeColor"), *C);
+}
+
+FString AQOrbitalController::ParamDisplay(int32 Index) const
+{
+	switch (Index)
+	{
+		case 0: return FString::Printf(TEXT("Hybridization: %.2f"),  Hybridization);
+		case 1: return FString::Printf(TEXT("CloudFuzziness: %.2f"), CloudFuzziness);
+		case 2: return FString::Printf(TEXT("MaxRadius: %.0f"),      MaxRadius);
+		case 3: return FString::Printf(TEXT("LayerGradient: %.1f"),  LayerGradient);
+		case 4: return FString::Printf(TEXT("SwitchProgress: %.2f"), SwitchProgress);
+		case 5: return FString::Printf(TEXT("SpawnDensity: %.0f"),   SpawnDensity);
+		case 6: return FString::Printf(TEXT("ColorCoreEdge: %.2f"),  ColorCoreEdge);
+		case 7: return FString::Printf(TEXT("ColorEdgeEdge: %.2f"),  ColorEdgeEdge);
+		case 8: return FString::Printf(TEXT("CoreColor  R%.2f G%.2f B%.2f"), CoreColor.R, CoreColor.G, CoreColor.B);
+		case 9: return FString::Printf(TEXT("EdgeColor  R%.2f G%.2f B%.2f"), EdgeColor.R, EdgeColor.G, EdgeColor.B);
+	}
+	return FString();
+}
+
+void AQOrbitalController::ResetParamToDefault(int32 Index)
+{
+	switch (Index)
+	{
+		case 0: Hybridization  = 3.f;    BroadcastFloat(TEXT("Hybridization"),  Hybridization);  break;
+		case 1: CloudFuzziness = 0.7f;   BroadcastFloat(TEXT("CloudFuzziness"), CloudFuzziness); break;
+		case 2: MaxRadius      = 250.f;  BroadcastFloat(TEXT("MaxRadius"),      MaxRadius);      break;
+		case 3: LayerGradient  = 2.f;    BroadcastFloat(TEXT("LayerGradient"),  LayerGradient);  break;
+		case 4: SwitchProgress = 0.f;    BroadcastFloat(TEXT("SwitchProgress"), SwitchProgress); break;
+		case 5: SpawnDensity   = 8000.f; BroadcastFloat(TEXT("SpawnDensity"),   SpawnDensity);   break;
+		case 6: ColorCoreEdge  = 0.4f;   BroadcastFloat(TEXT("ColorCoreEdge"),  ColorCoreEdge);  break;
+		case 7: ColorEdgeEdge  = 0.9f;   BroadcastFloat(TEXT("ColorEdgeEdge"),  ColorEdgeEdge);  break;
+		case 8: CoreColor = FLinearColor(1.f, 0.4f, 0.05f, 1.f); BroadcastColor(TEXT("CoreColor"), CoreColor); break;
+		case 9: EdgeColor = FLinearColor(0.3f, 0.75f, 1.f, 0.3f); BroadcastColor(TEXT("EdgeColor"), EdgeColor); break;
+	}
 }
