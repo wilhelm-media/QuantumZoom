@@ -42,3 +42,6 @@ Project/Plugins/AefDeepSync/
 *.log
 *.VC.db
 *.VC.opendb
+# Temp / scratch content (session working files)
+Project/Content/QZ_tmp/
+Project/Content/_QZSulfurTmp.umap

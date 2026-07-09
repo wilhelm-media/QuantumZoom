@@ -67,6 +67,14 @@ public:
 	UPROPERTY(EditAnywhere, Category="QOrbital|Motion", meta=(ClampMin="0.0", ClampMax="200.0"))
 	float LayerGradient = 2.f;
 
+	/** Curl-noise turbulence strength (force magnitude on the cloud). */
+	UPROPERTY(EditAnywhere, Category="QOrbital|Motion", meta=(ClampMin="0.0", ClampMax="20000.0"))
+	float CurlPower = 5000.f;
+
+	/** Curl-noise field frequency / scale. Higher = finer, busier turbulence. */
+	UPROPERTY(EditAnywhere, Category="QOrbital|Motion", meta=(ClampMin="0.0", ClampMax="5000.0"))
+	float CurlFrq = 1000.f;
+
 	// ───────────────────────────────────────────────────────────────────────
 	// Density
 	// ───────────────────────────────────────────────────────────────────────
@@ -81,6 +89,24 @@ public:
 	/** 0 = before oxidation, 1 = after. Drives orbital re-distribution toward partner bond */
 	UPROPERTY(EditAnywhere, Category="QOrbital|Switch", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float SwitchProgress = 0.f;
+
+	// ───────────────────────────────────────────────────────────────────────
+	// Volume-particle fusion — particles CONTAINED in the DFT-density volume
+	// texture (R=sulfur, G=oxygen, B=total). Two independent oxidation triggers.
+	// Niagara must expose User.DensityShift + User.ColorShift (float), and sample
+	// the Becke volume texture for containment. See NIAGARA_volume_particles.md.
+	// ───────────────────────────────────────────────────────────────────────
+
+	/** DATA-DRIVEN: 0 = the particle cloud sits on the SULFUR density field,
+	 *  1 = it migrates to the OXYGEN field. Niagara lerps the containment field
+	 *  lerp(R=sulfur, G=oxygen, DensityShift) from the Becke volume texture, so
+	 *  the cloud physically moves S→O — the real oxidation, in particles. */
+	UPROPERTY(EditAnywhere, Category="QOrbital|VolumeParticles", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float DensityShift = 0.f;
+
+	/** ARTISTIC: 0 = gold, 1 = blue. Pure recolor, independent of the data shift. */
+	UPROPERTY(EditAnywhere, Category="QOrbital|VolumeParticles", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ColorShift = 0.f;
 
 	// ───────────────────────────────────────────────────────────────────────
 	// Color anchors (Markos's max-3-colors rule)
@@ -164,7 +190,7 @@ private:
 	bool bPrevReset = false;   // R-stick click edge-detect (reset)
 
 	void HandleGamepadInput(float DeltaSeconds);
-	static int32 NumParams() { return 10; }
+	static int32 NumParams() { return 14; }
 	FString ParamDisplay(int32 Index) const;   // HUD line for the selected param
 	void NudgeScalar(int32 Index, float NormDelta);            // NormDelta = stick * DeltaSeconds
 	void NudgeColor (int32 Index, float DeltaHueDeg, float DeltaValue);

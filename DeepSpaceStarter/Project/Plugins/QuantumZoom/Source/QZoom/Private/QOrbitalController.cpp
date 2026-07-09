@@ -96,6 +96,10 @@ void AQOrbitalController::ApplyAllDirect()
 	ApplyColor(TEXT("EdgeColor"),      EdgeColor);
 	ApplyFloat(TEXT("ColorCoreEdge"),  ColorCoreEdge);
 	ApplyFloat(TEXT("ColorEdgeEdge"),  ColorEdgeEdge);
+	ApplyFloat(TEXT("CurlPower"),      CurlPower);
+	ApplyFloat(TEXT("CurlFrq"),        CurlFrq);
+	ApplyFloat(TEXT("DensityShift"),   DensityShift);
+	ApplyFloat(TEXT("ColorShift"),     ColorShift);
 	ApplyActive(bActive);
 }
 
@@ -118,6 +122,10 @@ void AQOrbitalController::ApplyAll()
 	BroadcastColor(TEXT("EdgeColor"),      EdgeColor);
 	BroadcastFloat(TEXT("ColorCoreEdge"),  ColorCoreEdge);
 	BroadcastFloat(TEXT("ColorEdgeEdge"),  ColorEdgeEdge);
+	BroadcastFloat(TEXT("CurlPower"),      CurlPower);
+	BroadcastFloat(TEXT("CurlFrq"),        CurlFrq);
+	BroadcastFloat(TEXT("DensityShift"),   DensityShift);
+	BroadcastFloat(TEXT("ColorShift"),     ColorShift);
 	BroadcastBool (TEXT("Active"),         bActive);
 }
 
@@ -139,6 +147,10 @@ void AQOrbitalController::PostEditChangeProperty(FPropertyChangedEvent& Property
 	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, EdgeColor))      BroadcastColor(TEXT("EdgeColor"),      EdgeColor);
 	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, ColorCoreEdge))  BroadcastFloat(TEXT("ColorCoreEdge"),  ColorCoreEdge);
 	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, ColorEdgeEdge))  BroadcastFloat(TEXT("ColorEdgeEdge"),  ColorEdgeEdge);
+	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, CurlPower))      BroadcastFloat(TEXT("CurlPower"),      CurlPower);
+	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, CurlFrq))        BroadcastFloat(TEXT("CurlFrq"),        CurlFrq);
+	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, DensityShift))   BroadcastFloat(TEXT("DensityShift"),   DensityShift);
+	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, ColorShift))     BroadcastFloat(TEXT("ColorShift"),     ColorShift);
 	else if (N == GET_MEMBER_NAME_CHECKED(AQOrbitalController, bActive))        BroadcastBool (TEXT("Active"),         bActive);
 }
 #endif
@@ -310,14 +322,14 @@ void AQOrbitalController::HandleGamepadInput(float Dt)
 	LX = (FMath::Abs(LX) > DZ) ? LX : 0.f;
 	LY = (FMath::Abs(LY) > DZ) ? LY : 0.f;
 
-	if (SelectedParam <= 7)                       // scalar params: X = value
-	{
-		if (LX != 0.f) NudgeScalar(SelectedParam, LX * Dt);
-	}
-	else                                          // color params: X = hue, Y = brightness
+	if (SelectedParam == 10 || SelectedParam == 11)  // color params: X = hue, Y = brightness
 	{
 		if (LX != 0.f || LY != 0.f)
 			NudgeColor(SelectedParam, LX * 360.f * GamepadAdjustRate * Dt, LY * GamepadAdjustRate * Dt);
+	}
+	else                                          // scalar params (0-9, 12, 13): X = value
+	{
+		if (LX != 0.f) NudgeScalar(SelectedParam, LX * Dt);
 	}
 
 	// Operator HUD — real Slate widget (NOT AddOnScreenDebugMessage, which the cluster
@@ -352,6 +364,10 @@ void AQOrbitalController::NudgeScalar(int32 Index, float NormDelta)
 		case 5: P = &SpawnDensity;   Lo = 0.f;  Hi = 50000.f; Name = TEXT("SpawnDensity");   break;
 		case 6: P = &ColorCoreEdge;  Lo = 0.f;  Hi = 1.f;     Name = TEXT("ColorCoreEdge");  break;
 		case 7: P = &ColorEdgeEdge;  Lo = 0.f;  Hi = 1.f;     Name = TEXT("ColorEdgeEdge");  break;
+		case 8: P = &CurlPower;      Lo = 0.f;  Hi = 20000.f; Name = TEXT("CurlPower");      break;
+		case 9: P = &CurlFrq;        Lo = 0.f;  Hi = 5000.f;  Name = TEXT("CurlFrq");        break;
+		case 12: P = &DensityShift;  Lo = 0.f;  Hi = 1.f;     Name = TEXT("DensityShift");   break;
+		case 13: P = &ColorShift;    Lo = 0.f;  Hi = 1.f;     Name = TEXT("ColorShift");     break;
 		default: return;
 	}
 	const float Range = Hi - Lo;
@@ -361,7 +377,7 @@ void AQOrbitalController::NudgeScalar(int32 Index, float NormDelta)
 
 void AQOrbitalController::NudgeColor(int32 Index, float DeltaHueDeg, float DeltaValue)
 {
-	FLinearColor* C = (Index == 8) ? &CoreColor : (Index == 9) ? &EdgeColor : nullptr;
+	FLinearColor* C = (Index == 10) ? &CoreColor : (Index == 11) ? &EdgeColor : nullptr;
 	if (!C) return;
 	FLinearColor HSV = C->LinearRGBToHSV();                 // R = Hue(0-360), G = Sat, B = Value
 	HSV.R = FMath::Fmod(HSV.R + DeltaHueDeg + 360.f, 360.f);
@@ -369,7 +385,7 @@ void AQOrbitalController::NudgeColor(int32 Index, float DeltaHueDeg, float Delta
 	const float SavedAlpha = C->A;
 	*C = HSV.HSVToLinearRGB();
 	C->A = SavedAlpha;                                      // preserve alpha (EdgeColor uses it)
-	BroadcastColor(Index == 8 ? TEXT("CoreColor") : TEXT("EdgeColor"), *C);
+	BroadcastColor(Index == 10 ? TEXT("CoreColor") : TEXT("EdgeColor"), *C);
 }
 
 FString AQOrbitalController::ParamDisplay(int32 Index) const
@@ -384,8 +400,12 @@ FString AQOrbitalController::ParamDisplay(int32 Index) const
 		case 5: return FString::Printf(TEXT("SpawnDensity: %.0f"),   SpawnDensity);
 		case 6: return FString::Printf(TEXT("ColorCoreEdge: %.2f"),  ColorCoreEdge);
 		case 7: return FString::Printf(TEXT("ColorEdgeEdge: %.2f"),  ColorEdgeEdge);
-		case 8: return FString::Printf(TEXT("CoreColor  R%.2f G%.2f B%.2f"), CoreColor.R, CoreColor.G, CoreColor.B);
-		case 9: return FString::Printf(TEXT("EdgeColor  R%.2f G%.2f B%.2f"), EdgeColor.R, EdgeColor.G, EdgeColor.B);
+		case 8: return FString::Printf(TEXT("CurlPower: %.0f"),      CurlPower);
+		case 9: return FString::Printf(TEXT("CurlFrq: %.0f"),        CurlFrq);
+		case 10: return FString::Printf(TEXT("CoreColor  R%.2f G%.2f B%.2f"), CoreColor.R, CoreColor.G, CoreColor.B);
+		case 11: return FString::Printf(TEXT("EdgeColor  R%.2f G%.2f B%.2f"), EdgeColor.R, EdgeColor.G, EdgeColor.B);
+		case 12: return FString::Printf(TEXT("DensityShift: %.2f  (S->O, data)"), DensityShift);
+		case 13: return FString::Printf(TEXT("ColorShift: %.2f  (gold->blue, art)"), ColorShift);
 	}
 	return FString();
 }
@@ -402,7 +422,11 @@ void AQOrbitalController::ResetParamToDefault(int32 Index)
 		case 5: SpawnDensity   = 8000.f; BroadcastFloat(TEXT("SpawnDensity"),   SpawnDensity);   break;
 		case 6: ColorCoreEdge  = 0.4f;   BroadcastFloat(TEXT("ColorCoreEdge"),  ColorCoreEdge);  break;
 		case 7: ColorEdgeEdge  = 0.9f;   BroadcastFloat(TEXT("ColorEdgeEdge"),  ColorEdgeEdge);  break;
-		case 8: CoreColor = FLinearColor(1.f, 0.4f, 0.05f, 1.f); BroadcastColor(TEXT("CoreColor"), CoreColor); break;
-		case 9: EdgeColor = FLinearColor(0.3f, 0.75f, 1.f, 0.3f); BroadcastColor(TEXT("EdgeColor"), EdgeColor); break;
+		case 8: CurlPower      = 5000.f; BroadcastFloat(TEXT("CurlPower"),      CurlPower);      break;
+		case 9: CurlFrq        = 1000.f; BroadcastFloat(TEXT("CurlFrq"),        CurlFrq);        break;
+		case 10: CoreColor = FLinearColor(1.f, 0.4f, 0.05f, 1.f); BroadcastColor(TEXT("CoreColor"), CoreColor); break;
+		case 11: EdgeColor = FLinearColor(0.3f, 0.75f, 1.f, 0.3f); BroadcastColor(TEXT("EdgeColor"), EdgeColor); break;
+		case 12: DensityShift = 0.f; BroadcastFloat(TEXT("DensityShift"), DensityShift); break;
+		case 13: ColorShift   = 0.f; BroadcastFloat(TEXT("ColorShift"),   ColorShift);   break;
 	}
 }

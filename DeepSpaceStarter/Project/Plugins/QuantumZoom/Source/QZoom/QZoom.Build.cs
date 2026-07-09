@@ -10,7 +10,7 @@ public class QZoom : ModuleRules
         {
             "Core", "CoreUObject", "Engine", "InputCore",
             "DisplayCluster", "LevelSequence", "MovieScene", "CinematicCamera",
-            "UMG"
+            "UMG", "ProceduralMeshComponent"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
