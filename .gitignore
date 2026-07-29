@@ -1,0 +1,3 @@
+# Git-LFS writes its hook stubs into a literal dev/null folder when a shell
+# redirect gets resolved as a relative path. Pure noise, never belongs in the repo.
+/dev/

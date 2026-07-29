@@ -80,7 +80,7 @@ public:
 	FVector Anchor = FVector(1500.f, 0.f, 120.f);
 
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="2", ClampMax="12"))
-	int32 StationCount = 6;
+	int32 StationCount = 7;
 
 	/** 0..1 across all stations. Trigger-driven on the primary node, cluster-synced. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="1.0"))
@@ -323,7 +323,11 @@ public:
 
 	// ── Constant scale/zoom readout ───────────────────────────────────────────
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
-	TArray<float> ScaleMeters = {0.09f, 3e-6f, 1e-8f, 2e-10f, 1e-10f, 8e-15f};
+	// 7 stations: MYCELIUM (300 um) inserted at index 1. It halves the worst leg —
+	// S0->Cell was 4.48 decades, the longest on the ladder and flagged in the code as a
+	// problem; it is now 2.48 + 2.00. Note these are CLASS DEFAULTS: a pawn already
+	// placed in a level carries its own serialised copy and ignores them.
+	TArray<float> ScaleMeters = {0.09f, 3e-4f, 3e-6f, 1e-8f, 2e-10f, 1e-10f, 8e-15f};
 	/** Camera-relative (forward, right, up). Negative right = LEFT; positive up keeps it high on the
 	 *  WALL and out of the floor frustum. Default = top-left of the wall. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
