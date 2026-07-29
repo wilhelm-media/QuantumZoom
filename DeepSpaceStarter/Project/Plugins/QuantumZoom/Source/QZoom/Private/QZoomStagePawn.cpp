@@ -543,7 +543,21 @@ float AQZoomStagePawn::StageCentre(int32 N) const
 {
 	// Stages live in [ZoomLeadIn, 1] so ZoomProgress 0 sits BEFORE stage 0 — you start further out and S0
 	// blooms in as you begin. ZoomLeadIn 0 restores the original centres (N/(StationCount-1)).
-	const float f = (StationCount > 1) ? (float)N / (float)(StationCount - 1) : 0.f;
+	float f = (StationCount > 1) ? (float)N / (float)(StationCount - 1) : 0.f;
+
+	// LOG SPACING: place the station where its SCALE says, not where its index says. By index every leg gets
+	// an equal slice of ZoomProgress regardless of how far it travels, so with this ladder the 4.48-decade
+	// S0->S1 and the 0.30-decade S3->S4 take the same time — a 15x swing in apparent zoom rate. Weighting by
+	// log(scale) makes equal progress mean equal decades, which is a constant perceived rate.
+	const int32 Last = ScaleMeters.Num() - 1;
+	if (bLogSpacedStations && Last >= 1 && ScaleMeters.IsValidIndex(N))
+	{
+		const float L0 = FMath::Loge(FMath::Max(ScaleMeters[0],    1e-30f));
+		const float LE = FMath::Loge(FMath::Max(ScaleMeters[Last], 1e-30f));
+		const float LN = FMath::Loge(FMath::Max(ScaleMeters[N],    1e-30f));
+		const float Span = L0 - LE;                       // positive: scales shrink along the ladder
+		if (FMath::Abs(Span) > 1e-6f) f = (L0 - LN) / Span;
+	}
 	return ZoomLeadIn + f * (1.f - ZoomLeadIn);
 }
 
@@ -1231,6 +1245,17 @@ float AQZoomStagePawn::CurrentScaleMeters() const
 	if (N == 1) return ScaleMeters[0];
 	// remap past the lead-in so the scale readout tracks the shifted stage centres (lead-in reads as S0 scale)
 	const float Zn = FMath::Clamp((ZoomProgress - ZoomLeadIn) / FMath::Max(1.f - ZoomLeadIn, 1e-3f), 0.f, 1.f);
+
+	// Must use the SAME spacing as StageCentre(), or the readout disagrees with the descent it is describing.
+	// Under log spacing the stations sit at their log positions, so the scale between them is just a straight
+	// log-lerp end to end — constant decades per unit of progress, no per-segment remap.
+	if (bLogSpacedStations && N >= 2)
+	{
+		const float L0 = FMath::Loge(FMath::Max(ScaleMeters[0],     1e-30f));
+		const float LE = FMath::Loge(FMath::Max(ScaleMeters[N - 1], 1e-30f));
+		return FMath::Exp(FMath::Lerp(L0, LE, Zn));
+	}
+
 	const float P = Zn * (float)(N - 1);
 	const int32 I = FMath::Clamp((int32)P, 0, N - 2);
 	const float F = P - (float)I;

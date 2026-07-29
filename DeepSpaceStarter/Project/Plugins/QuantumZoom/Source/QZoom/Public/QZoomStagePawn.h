@@ -141,6 +141,22 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="0.4"))
 	float ZoomLeadIn = 0.15f;
 
+	/** Space the stations by their PHYSICAL SCALE instead of by their index.
+	 *
+	 *  Off (the original behaviour) StageCentre is N/(StationCount-1): every leg gets an equal slice of
+	 *  ZoomProgress no matter how far it actually travels. ScaleMeters is never consulted. With the current
+	 *  ladder that means S0->S1 covers 4.48 decades in the same time S3->S4 covers 0.30 — the apparent zoom
+	 *  rate swings by 15x, which is what reads as the descent surging and stalling.
+	 *
+	 *  On, each station sits at its log-scale position, so equal ZoomProgress == equal decades == a constant
+	 *  perceived rate of magnification. That is the Powers-of-Ten pacing a continuous zoom needs to feel
+	 *  credible. It does NOT require renumbering and does not touch any station.
+	 *
+	 *  Left as a switch on purpose: flip it in the Details panel to A/B the two pacings on the wall without
+	 *  a rebuild. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage")
+	bool bLogSpacedStations = true;
+
 	/** Cross-fade width (natural-log scale units) at each edge of the visible band — the pawn pushes a
 	 *  'StationFade' 0..1 onto each station's materials so prev/next dissolve instead of popping.
 	 *  Materials without a StationFade param just hard-hide as before. Bigger = longer dissolve. */
