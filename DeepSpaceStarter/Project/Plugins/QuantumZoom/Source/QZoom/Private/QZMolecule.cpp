@@ -208,7 +208,14 @@ bool AQZMolecule::ParsePdb(TArray<FAtomRec>& Out, FVector& Centroid) const
 		const FString Res  = Ln.Mid(22, 4);
 		const FString Sym  = (Ln.Len() >= 78) ? Ln.Mid(76, 2) : FString();
 		FAtomRec A;
-		A.Pos  = FVector(FCString::Atod(*Ln.Mid(30, 8)), FCString::Atod(*Ln.Mid(38, 8)), FCString::Atod(*Ln.Mid(46, 8)));
+		// HANDEDNESS: PDB (like Blender) is RIGHT-handed; Unreal is LEFT-handed. The static NirA meshes get
+		// this conversion for free — Blender exports FBX and UE's importer negates Y on the way in. This
+		// parser used to drop raw PDB coordinates straight into UE space, so the procedural molecule rendered
+		// as the MIRROR IMAGE of the static ones (Michael: "seems mirrored" — he was right).
+		// Negating Y is a reflection (det = -1), which is exactly what converts between the two conventions.
+		// This matters beyond looks: a mirrored L-amino-acid protein is D-, i.e. physically wrong, and this
+		// piece is presented as science.
+		A.Pos  = FVector(FCString::Atod(*Ln.Mid(30, 8)), -FCString::Atod(*Ln.Mid(38, 8)), FCString::Atod(*Ln.Mid(46, 8)));
 		A.Res  = FCString::Atoi(*Res);
 		A.Elem = ElemFromSymbol(Sym, Name);
 		Sum += A.Pos;
@@ -216,6 +223,42 @@ bool AQZMolecule::ParsePdb(TArray<FAtomRec>& Out, FVector& Centroid) const
 	}
 	if (Out.Num() == 0) return false;
 	Centroid = Sum / Out.Num();
+
+	// CENTRE ON THE HIGHLIGHT RESIDUE, not the protein centroid.
+	// Michael: "two of the nirA display options align perfectly the third is off" — this was the third.
+	// The two STATIC versions were physically re-centred on MET169 in Blender (nira_align.py /
+	// align_nira_highres.py put the residue at the mesh origin, HL1 verified at 0.000), so placing their
+	// actor on the Anchor puts MET169 on the zoom centre. This procedural version placed atoms at
+	// (Pos - Centroid), i.e. it centred the WHOLE PROTEIN's average — leaving MET169 ~1000 UU off-axis, so
+	// swapping to it with X jumped the frame and the dive no longer converged on the residue.
+	// Centring on the same residue makes all three versions agree by construction.
+	if (CentreResidue != 0)
+	{
+		// Use the residue's BOUNDS centre (min+max)/2 — NOT the mean of its atom positions. Blender's
+		// align_met169.py/nira_align.py centred the static meshes on the HL1 objects' combined BOUNDS centre,
+		// and for an asymmetric side chain like methionine the two differ by a few tenths of an Angstrom.
+		// Matching the method exactly is what makes all three versions land on the same point.
+		FVector Lo(BIG_NUMBER), Hi(-BIG_NUMBER);
+		int32 RN = 0;
+		for (const FAtomRec& A : Out)
+		{
+			if (A.Res != CentreResidue) continue;
+			Lo = Lo.ComponentMin(A.Pos); Hi = Hi.ComponentMax(A.Pos);
+			++RN;
+		}
+		if (RN > 0)
+		{
+			Centroid = (Lo + Hi) * 0.5f;
+			UE_LOG(LogTemp, Log, TEXT("[QZMolecule] centred on residue %d (%d atoms), bounds centre %s"),
+				CentreResidue, RN, *Centroid.ToString());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[QZMolecule] CentreResidue %d not found in %s — falling back to the "
+				"protein centroid; this version will NOT line up with the pre-centred static meshes."),
+				CentreResidue, *Path);
+		}
+	}
 	return true;
 }
 
@@ -259,6 +302,34 @@ void AQZMolecule::Build()
 		const float   R = VdW * BallScale * ModelScale;
 		const float   S = (R / 50.f) * (bIsHi ? 1.25f : 1.0f);   // engine sphere r=50 at scale 1
 		C->AddInstance(FTransform(FRotator::ZeroRotator, P, FVector(S)));
+	}
+
+	// DIAGNOSTIC: report what was ACTUALLY built, in world space. The ISMs only exist at runtime, so every
+	// headless check of this actor is blind — this is the only honest way to compare the procedural version
+	// against the two static ones (Michael: it is still the X-cycled one that is off).
+	{
+		FVector Lo(BIG_NUMBER), Hi(-BIG_NUMBER), HlLo(BIG_NUMBER), HlHi(-BIG_NUMBER);
+		int32 NHl = 0;
+		for (const FAtomRec& A : Rec)
+		{
+			const FVector P = (A.Pos - Centroid) * ModelScale;
+			Lo = Lo.ComponentMin(P); Hi = Hi.ComponentMax(P);
+			if (bHi && A.Res == HighlightResidue) { HlLo = HlLo.ComponentMin(P); HlHi = HlHi.ComponentMax(P); ++NHl; }
+		}
+		const FTransform T = GetActorTransform();
+		UE_LOG(LogTemp, Warning, TEXT("[QZMolecule] BUILT %d atoms | ModelScale=%.2f CentreResidue=%d"),
+			Rec.Num(), ModelScale, CentreResidue);
+		UE_LOG(LogTemp, Warning, TEXT("[QZMolecule]   local bbox = %s .. %s  (size %s)"),
+			*Lo.ToString(), *Hi.ToString(), *(Hi - Lo).ToString());
+		UE_LOG(LogTemp, Warning, TEXT("[QZMolecule]   actor at %s  scale %s"),
+			*T.GetLocation().ToString(), *T.GetScale3D().ToString());
+		if (NHl > 0)
+		{
+			const FVector HlC = (HlLo + HlHi) * 0.5f;
+			UE_LOG(LogTemp, Warning, TEXT("[QZMolecule]   residue %d local centre = %s  -> WORLD %s"),
+				HighlightResidue, *HlC.ToString(), *T.TransformPosition(HlC).ToString());
+			UE_LOG(LogTemp, Warning, TEXT("[QZMolecule]   ^ this WORLD point must equal the Anchor; anything else IS the misalignment"));
+		}
 	}
 
 	// ---- bonds: spatial hash in Angstrom space -> instanced cylinders ----

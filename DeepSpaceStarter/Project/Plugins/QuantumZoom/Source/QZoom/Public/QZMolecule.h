@@ -29,6 +29,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Molecule") float BondRadius = 0.16f;   // Angstrom
 	UPROPERTY(EditAnywhere, Category = "Molecule") bool  bBuildBonds = true;
 	UPROPERTY(EditAnywhere, Category = "Molecule") int32 HighlightResidue = 0; // 0 = none
+	/** Residue to put on the actor's ORIGIN (0 = centre on the whole-protein centroid, the old behaviour).
+	 *  Set to 169 for NirA: the two static NirA versions were physically re-centred on MET169 in Blender, so
+	 *  this procedural version must centre on the same residue or it will not line up with them when X swaps
+	 *  versions — the zoom would converge on the protein's middle instead of on the residue we dive into. */
+	UPROPERTY(EditAnywhere, Category = "Molecule") int32 CentreResidue = 0;
 	UPROPERTY(EditAnywhere, Category = "Molecule") bool  bRebuildNow = false;  // toggle to rebuild in-editor
 	// Procedurally-generated animated volume hull (icosphere shrink-wrapped to the atom cloud).
 	UPROPERTY(EditAnywhere, Category = "Hull") bool  bShowHull = true;

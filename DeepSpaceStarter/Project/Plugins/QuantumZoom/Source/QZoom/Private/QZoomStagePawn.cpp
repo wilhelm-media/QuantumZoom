@@ -1,4 +1,7 @@
 #include "QZoomStagePawn.h"
+#include "HAL/IConsoleManager.h"   // R3 Nanite-diagnostic cvar toggle (r.Nanite.ProxyRenderMode)
+#include "RHIDefinitions.h"         // ERHIFeatureLevel — the HUD reports the node's feature level (SM5 vs SM6)
+#include "SceneInterface.h"         // FSceneInterface::GetFeatureLevel()
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/TextRenderComponent.h"
@@ -14,13 +17,17 @@
 #include "Sound/SoundAttenuation.h"
 #include "Engine/PostProcessVolume.h"
 #include "Kismet/GameplayStatics.h"
+#include "DisplayClusterRootActor.h"   // free-look drives the DCRA in a cluster (nDisplay frustum source)
+#include "Camera/PlayerCameraManager.h"
 #include "IDisplayCluster.h"
 #include "Cluster/IDisplayClusterClusterManager.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
+#include "Components/HeterogeneousVolumeComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Components/LightComponent.h"
+#include "Components/PointLightComponent.h"
 #include "NiagaraComponent.h"
 
 const FString AQZoomStagePawn::EventName = TEXT("QZoomStage.State");
@@ -112,6 +119,13 @@ void AQZoomStagePawn::BeginPlay()
 	}
 	UE_LOG(LogTemp, Log, TEXT("[QZoomStagePawn] cluster=%d primary=%d"), bInCluster, bIsPrimary);
 
+	// SVT STREAMING BANDWIDTH (the mip-pop fix, see UpdateOxidation): the default 512 MiB/s throttle serves
+	// LOWER MIPS when exceeded — our ping-pong's fast sweep (2 volumes x ~187 fps peak x ~1.4 MB/frame)
+	// blows through it, so the sulfur switch flashed blurry near every turnaround. Deep Space nodes have
+	// NVMe + big GPUs; give the SVT streamer real headroom. Runs on EVERY node (BeginPlay is per-process).
+	if (IConsoleVariable* CvBW = IConsoleManager::Get().FindConsoleVariable(TEXT("r.SparseVolumeTexture.Streaming.BandwidthLimit")))
+		CvBW->Set(FMath::Max(SVTBandwidthMiB, 512), ECVF_SetByConsole);
+
 	// PIE only: become the view. In a cluster the nDisplay DCRA renders — do NOT possess (the pawn just
 	// ticks + broadcasts). Input polling works either way via GetFirstPlayerController on the primary.
 	if (!bInCluster)
@@ -135,6 +149,24 @@ void AQZoomStagePawn::BeginPlay()
 		for (UTextRenderComponent* T : { Readout, DetailTitle, DetailSub, DetailScale, DetailProv })
 			if (T) T->SetTextMaterial(ReadoutMaterial);
 	if (Readout) Readout->SetTextRenderColor(TextColor.ToFColor(true));   // constant readout uses the interface colour
+
+	// HUD ON TOP, no environment reaction (Michael): the text was being occluded by 3D objects and picking up
+	// lights/shadows. The material is already Unlit + DisableDepthTest, but the COMPONENTS also need:
+	//  - a very high translucency sort priority so they draw AFTER all scene translucency (never behind a mesh)
+	//  - no shadow casting / receiving (a TextRender shouldn't, but be explicit)
+	//  - render in the main pass only (so nothing depth-writes them into occlusion)
+	// Excluding them from the PP presets: they are Unlit + depth-test-off, so lighting/shadows already miss
+	// them; the remaining grade (tonemap/color) is applied to the whole frame — the honest way to exempt HUD
+	// from that is a separate post-tonemap pass, which TextRender can't do alone. Flagged below.
+	for (UTextRenderComponent* T : { Readout, DetailTitle, DetailSub, DetailScale, DetailProv })
+	{
+		if (!T) continue;
+		T->SetTranslucentSortPriority(1000);   // draw last, on top of scene translucency
+		T->SetCastShadow(false);
+		T->bAffectDynamicIndirectLighting = false;
+		T->bAffectDistanceFieldLighting = false;
+		T->SetReceivesDecals(false);
+	}
 
 	// Fixed detail block (camera-relative) — EDITORIAL: RIGHT-aligned column, anchored from the TOP so it sits
 	// at the SAME height as the readout. Title (optional serif) → hairline rule → sub → scale → provenance.
@@ -209,7 +241,18 @@ void AQZoomStagePawn::BeginPlay()
 	ApplyPPPreset(PPPreset);
 	UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] PPVolume %s"), PPVolume ? TEXT("spawned") : TEXT("FAILED — presets have no volume"));
 
-	InitFillers();          // scientific space fillers (F cycles off/motes/grid/structures)
+	// ── STARTUP TIMING ──────────────────────────────────────────────────────────────────────────────────
+	// I have guessed at this stall four times (warm-up, fillers, DDC, DMIs) and been wrong each time.
+	// Stop guessing: TIME each phase and let the log name the cost.
+	{
+		const double T0 = FPlatformTime::Seconds();
+		InitFillers();          // scientific space fillers (F cycles off/motes/grid/structures)
+		const double T1 = FPlatformTime::Seconds();
+		BuildMaterialCache();   // every DMI up front, so the per-frame path only SETS parameters
+		const double T2 = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] BeginPlay: InitFillers %.1f ms | BuildMaterialCache %.1f ms"),
+			(T1 - T0) * 1000.0, (T2 - T1) * 1000.0);
+	}
 	SetFillerMode(FillerMode);
 	PrevZoom = ZoomProgress;
 
@@ -233,7 +276,19 @@ void AQZoomStagePawn::Tick(float Dt)
 		PollInput(Dt);
 		Broadcast();
 	}
+	// ── HITCH DETECTOR ──────────────────────────────────────────────────────────────────────────────────
+	// Michael reports a heavy stall at the start that clears once the lab settles. Rather than theorise a
+	// fifth time, measure: log any frame slower than HitchMs, with the pawn's own phase timings, and say
+	// whether the time is INSIDE this Tick or outside it (= renderer/streaming/PSO, i.e. not the pawn).
+	const double TickT0 = FPlatformTime::Seconds();
+	static double LastFrameEnd = 0.0;
+	const double GapMs = (LastFrameEnd > 0.0) ? (TickT0 - LastFrameEnd) * 1000.0 : 0.0;
+
+	const double B0 = FPlatformTime::Seconds();
+	BuildMaterialCache();   // no-op once every station's DMIs are cached (cheap count check while streaming)
+	const double B1 = FPlatformTime::Seconds();
 	ApplyStations();    // every node (secondaries got ZoomProgress/orbit via the event)
+	const double B2 = FPlatformTime::Seconds();
 
 	// Cluster-consistent visual velocity from the synced ZoomProgress delta (valid on every node).
 	const float VisVel = (Dt > 1e-5f) ? (ZoomProgress - PrevZoom) / Dt : 0.f;
@@ -267,6 +322,26 @@ void AQZoomStagePawn::Tick(float Dt)
 	UpdateAudio();
 	UpdateFillers(Dt);   // molecular fillers: inherit orbit + self-swirl + zoom-scale
 	UpdateLights();      // fade station-sublevel lights by their station's visibility (populated in ApplyStations)
+	ApplyStyleLight();   // every frame so the intensity EASES toward its ladder target (not just on press)
+	UpdateOxidation(Dt); // S3: ping-pong the sulfur-switch SVT frame (dwell -> snap -> dwell)
+	UpdateGuides();      // authoring aid: fixed front-facing marker + zoom-centre reticle at the Anchor
+	ApplyNiraShells();   // hide SM_S2_NirA's enclosing ribbon/VOLUME so they don't obscure MET169
+	ApplyPalette();      // squeeze the hue spread toward the amber/blue poles (Back/Start, R3 = reset)
+
+	// ── HITCH REPORT ────────────────────────────────────────────────────────────────────────────────────
+	const double TickT1 = FPlatformTime::Seconds();
+	const double TickMs  = (TickT1 - TickT0) * 1000.0;
+	const double FrameMs = GapMs + TickMs;
+	LastFrameEnd = TickT1;
+	if (bLogHitches && FrameMs > HitchMs && HitchesLogged < 400)
+	{
+		++HitchesLogged;
+		// GapMs = everything OUTSIDE this Tick (render thread, GPU, streaming, PSO compiles, other actors).
+		// TickMs = this pawn. If Gap >> Tick, the stall is NOT my code — and that is the answer we need.
+		UE_LOG(LogTemp, Warning,
+			TEXT("[QZoomHitch] frame %.1f ms = pawn %.2f (cache %.2f, stations %.2f) + OUTSIDE %.1f  | zoom %.0f%% warm %d"),
+			FrameMs, TickMs, (B1 - B0) * 1000.0, (B2 - B1) * 1000.0, GapMs, ZoomProgress * 100.f, WarmupLeft);
+	}
 }
 
 void AQZoomStagePawn::PollInput(float Dt)
@@ -293,6 +368,39 @@ void AQZoomStagePawn::PollInput(float Dt)
 	OrbitYaw   += RX * OrbitRate * Dt;
 	OrbitPitch += RY * OrbitRate * Dt;   // completely free — no pitch clamp (MaxPitch now unused)
 
+	// LEFT STICK = FREE LOOK: turn the camera in place, position stays on the orbit path. After FreeLookHold
+	// seconds idle, ease back to centre over FreeLookReturn seconds. Any input cancels the return instantly.
+	float LX = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftX);
+	float LY = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftY);
+	LX = (FMath::Abs(LX) > DZ) ? LX : 0.f;
+	LY = (FMath::Abs(LY) > DZ) ? LY : 0.f;
+	if (LX != 0.f || LY != 0.f)
+	{
+		// active input: drive the offset, reset the idle clock, cancel any in-progress return
+		LookYaw   = FMath::Clamp(LookYaw   + LX * FreeLookRate * Dt, -FreeLookMaxYaw,   FreeLookMaxYaw);
+		LookPitch = FMath::Clamp(LookPitch + LY * FreeLookRate * Dt, -FreeLookMaxPitch, FreeLookMaxPitch);   // up=up
+		LookIdle = 0.f;
+		LookRetT = -1.f;
+	}
+	else
+	{
+		LookIdle += Dt;
+		if (LookRetT < 0.f && LookIdle >= FreeLookHold)   // idle long enough: begin the ease-back
+		{
+			LookRetT = 0.f; LookRetFromYaw = LookYaw; LookRetFromPitch = LookPitch;
+		}
+		if (LookRetT >= 0.f)
+		{
+			LookRetT += Dt;
+			const float u = FMath::Clamp(LookRetT / FMath::Max(FreeLookReturn, 1e-3f), 0.f, 1.f);
+			const float e = u * u * u * (u * (u * 6.f - 15.f) + 10.f);   // smootherstep
+			LookYaw   = FMath::Lerp(LookRetFromYaw,   0.f, e);
+			LookPitch = FMath::Lerp(LookRetFromPitch, 0.f, e);
+			if (u >= 1.f) { LookYaw = 0.f; LookPitch = 0.f; LookRetT = -1.f; }
+		}
+	}
+	ApplyFreeLook(LookYaw, LookPitch);
+
 	// D-Pad Up/Down = PP preset (neutral + P1..P4 = 5 states); D-Pad Left/Right = space-filler cycle. Rising-edge.
 	const bool bUp = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Up),   bDn = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Down);
 	const bool bLf = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Left), bRt = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Right);
@@ -304,7 +412,8 @@ void AQZoomStagePawn::PollInput(float Dt)
 
 	// LB / RB = STYLE LIGHT intensity (the freed S4 key light). 5 steps: off / dim / base / bright / blown.
 	const bool bLB = PC->IsInputKeyDown(EKeys::Gamepad_LeftShoulder), bRB = PC->IsInputKeyDown(EKeys::Gamepad_RightShoulder);
-	if (bRB && !bRBPrev) { StyleLightStep = FMath::Min(StyleLightStep + 1, 5); ApplyStyleLight(); }
+	// clamp to the LADDER's length, not a hard-coded 5 — otherwise the extra high steps are unreachable
+	if (bRB && !bRBPrev) { StyleLightStep = FMath::Min(StyleLightStep + 1, FMath::Max(StyleLightLadder.Num() - 1, 0)); ApplyStyleLight(); }
 	if (bLB && !bLBPrev) { StyleLightStep = FMath::Max(StyleLightStep - 1, 0); ApplyStyleLight(); }
 	bLBPrev = bLB; bRBPrev = bRB;
 
@@ -316,13 +425,53 @@ void AQZoomStagePawn::PollInput(float Dt)
 
 	// X (face-button left) = cycle the NirA representation: 0 high-res FBX / 1 low-res FBX / 2 procedural
 	const bool bX = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Left);
-	if (bX && !bXPrev) { NiraVersion = (NiraVersion + 1) % 3; }
+	if (bX && !bXPrev) { NiraVersion = (NiraVersion + 1) % FMath::Max(NiraVersionCount, 1); }
 	bXPrev = bX;
 
 	// Y (face-button top) = CLEAN MODE: hide the whole HUD for clean photography plates.
 	const bool bY = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Top);
 	if (bY && !bYPrev) { bCleanMode = !bCleanMode; SetCleanMode(bCleanMode); }
 	bYPrev = bY;
+
+	// F2 toggles the authoring guides (front-facing marker + centre reticle). Keyboard-only ON PURPOSE: it is
+	// a setup aid, not show content — a controller button could be hit by a visitor mid-installation.
+	const bool bG = PC->IsInputKeyDown(EKeys::F2);
+	if (bG && !bGuidePrev) { bShowFrontIndicator = !bShowFrontIndicator; }
+	bGuidePrev = bG;
+
+	// PALETTE squeeze — Back/Start step the hue window, R3 resets to the authored palette.
+	// (Back/Start/R3 were the only free inputs: LB/RB=light, A/B=filler density, X=NirA version,
+	//  Y=clean mode, L3=oxidation freeze, D-pad=PP preset + filler mode, triggers=zoom, R-stick=orbit.)
+	const bool bPm = PC->IsInputKeyDown(EKeys::Gamepad_Special_Left)  || PC->IsInputKeyDown(EKeys::LeftBracket);
+	const bool bPp = PC->IsInputKeyDown(EKeys::Gamepad_Special_Right) || PC->IsInputKeyDown(EKeys::RightBracket);
+	if (bPm && !bPalMinusPrev) PaletteWidth = FMath::Clamp(PaletteWidth - PaletteStep, 0.f, 1.f);  // tighter
+	if (bPp && !bPalPlusPrev)  PaletteWidth = FMath::Clamp(PaletteWidth + PaletteStep, 0.f, 1.f);  // wider
+	bPalMinusPrev = bPm; bPalPlusPrev = bPp;
+
+	// R3 (right-stick click) = NANITE DIAGNOSTIC cycle, for pinning the low-poly-hull-on-the-wall issue
+	// WITHOUT the console (hard to reach in the cluster). Cycles r.Nanite.ProxyRenderMode:
+	//   0 = normal (whatever the cluster does now)
+	//   2 = FORCE fallback (should look WORSE — if it matches the bug, the cluster was already doing this)
+	//   3 = FORCE full Nanite (should look BEST — if this fixes it, we bake it into the packaged config)
+	// The current mode is shown in the HUD (NaniteDiag) so it's readable on the wall.
+	const bool bR3 = PC->IsInputKeyDown(EKeys::Gamepad_RightThumbstick);
+	if (bR3 && !bNaniteDiagPrev)
+	{
+		// The PRIMARY steps the counter here; Broadcast() sends 'nan' and every node applies the cvar in
+		// OnClusterEvent so wall + floor stay in lock-step. The primary must ALSO apply it locally right now:
+		// it just bumped NaniteDiagStep, so when its OWN broadcast loops back the (NewNan != NaniteDiagStep)
+		// guard is already false and the cvar would never actually get set on THIS node — which is exactly
+		// why R3 did nothing on the single-node local switchboard. Apply here (idempotent); OnClusterEvent
+		// converges the secondaries.
+		NaniteDiagStep = (NaniteDiagStep + 1) % 3;
+		ApplyNaniteDiag();
+	}
+	bNaniteDiagPrev = bR3;
+
+	// L3 (left-stick click) = freeze/resume the S3 oxidation ping-pong (hold a hero state for a photo).
+	const bool bL3 = PC->IsInputKeyDown(EKeys::Gamepad_LeftThumbstick);
+	if (bL3 && !bL3Prev) { bOxFrozen = !bOxFrozen; }
+	bL3Prev = bL3;
 }
 
 void AQZoomStagePawn::Broadcast()
@@ -343,6 +492,12 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("nver"),  FString::FromInt(NiraVersion));
 	Event.Parameters.Add(TEXT("slit"),  FString::FromInt(StyleLightStep));
 	Event.Parameters.Add(TEXT("clean"), FString::FromInt(bCleanMode ? 1 : 0));
+	Event.Parameters.Add(TEXT("oxt"),   FString::SanitizeFloat(OxTime));
+	Event.Parameters.Add(TEXT("oxf"),   FString::FromInt(bOxFrozen ? 1 : 0));
+	Event.Parameters.Add(TEXT("pal"),   FString::SanitizeFloat(PaletteWidth));   // palette squeeze: all walls agree
+	Event.Parameters.Add(TEXT("nan"),   FString::FromInt(NaniteDiagStep));       // Nanite diagnostic mode: every node
+	Event.Parameters.Add(TEXT("lyaw"),  FString::SanitizeFloat(LookYaw));        // free-look offset: the FLOOR node needs it
+	Event.Parameters.Add(TEXT("lpit"),  FString::SanitizeFloat(LookPitch));      // (floor is a separate node, no PollInput)
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
 }
 
@@ -364,6 +519,23 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	if (NewSL != StyleLightStep) { StyleLightStep = NewSL; ApplyStyleLight(); }
 	const bool NewClean = (FCString::Atoi(*E.Parameters.FindRef(TEXT("clean"))) != 0);
 	if (NewClean != bCleanMode) { bCleanMode = NewClean; SetCleanMode(bCleanMode); }
+	OxTime    = FCString::Atof(*E.Parameters.FindRef(TEXT("oxt")));
+	bOxFrozen = (FCString::Atoi(*E.Parameters.FindRef(TEXT("oxf"))) != 0);
+	if (const FString* Pal = E.Parameters.Find(TEXT("pal"))) PaletteWidth = FCString::Atof(**Pal);   // ApplyPalette picks it up
+	// NANITE diagnostic: apply the cvar on every node (this receive runs on primary + all secondaries), so the
+	// floor node changes with the wall. No equality guard — the primary already bumped its own NaniteDiagStep in
+	// PollInput, so a guard would make its self-loopback a no-op; ApplyNaniteDiag is idempotent, just re-set it.
+	if (const FString* Nan = E.Parameters.Find(TEXT("nan")))
+	{
+		NaniteDiagStep = FCString::Atoi(**Nan);
+		ApplyNaniteDiag();
+	}
+	// FREE-LOOK on every node. In a real cluster the FLOOR is a SEPARATE node running its own copy of this pawn;
+	// PollInput()/ApplyFreeLook() only run on the primary, so the floor never turned. Carry the look offset in the
+	// event and drive ApplyFreeLook here so every node's DCRA/viewpoints rotate identically.
+	if (const FString* Ly = E.Parameters.Find(TEXT("lyaw")))  LookYaw   = FCString::Atof(**Ly);
+	if (const FString* Lp = E.Parameters.Find(TEXT("lpit")))  LookPitch = FCString::Atof(**Lp);
+	if (!bIsPrimary) ApplyFreeLook(LookYaw, LookPitch);   // primary already applied it in PollInput this frame
 	ApplyStations();
 }
 
@@ -375,9 +547,31 @@ float AQZoomStagePawn::StageCentre(int32 N) const
 	return ZoomLeadIn + f * (1.f - ZoomLeadIn);
 }
 
+float AQZoomStagePawn::StationK(int32 N) const
+{
+	// Per-station steepness. Priority: enabled Handover.Timing > StationZoomK > global ZoomK. So the simplified
+	// Handover set (item 4) wins where it's on, and everything falls back cleanly where it isn't.
+	float K = ZoomK;
+	if (Handover.IsValidIndex(N) && Handover[N].bEnabled)      K = Handover[N].Timing;
+	else if (StationZoomK.IsValidIndex(N) && StationZoomK[N] > 0.f) K = StationZoomK[N];
+	return FMath::Max(K * ZoomIntensity, 0.01f);
+}
+
 float AQZoomStagePawn::StationScale(int32 N) const
 {
-	return FMath::Exp((ZoomProgress - StageCentre(N)) * ZoomK);
+	return FMath::Exp((ZoomProgress - StageCentre(N)) * StationK(N));
+}
+
+float AQZoomStagePawn::LocalK() const
+{
+	// The K "at this depth", for things that follow the dive as a whole rather than belonging to one station
+	// (the fillers). Blend between the two stations we sit between, so K changes smoothly across a leg instead
+	// of snapping at the midpoint — a hard switch would visibly jolt the filler growth mid-zoom.
+	if (StationCount < 2) return StationK(0);
+	const float c0 = StageCentre(0), cN = StageCentre(StationCount - 1);
+	const float t = FMath::Clamp((ZoomProgress - c0) / FMath::Max(cN - c0, 1e-3f), 0.f, 1.f) * (StationCount - 1);
+	const int32 i = FMath::Clamp((int32)t, 0, StationCount - 2);
+	return FMath::Lerp(StationK(i), StationK(i + 1), FMath::Clamp(t - (float)i, 0.f, 1.f));
 }
 
 void AQZoomStagePawn::ApplyStations()
@@ -385,9 +579,16 @@ void AQZoomStagePawn::ApplyStations()
 	UWorld* W = GetWorld();
 	if (!W) return;
 	const FRotator Orbit(OrbitPitch, OrbitYaw, 0.f);
-	const float LnMin = FMath::Loge(FMath::Max(MinVisScale, 1e-30f));   // MaxVis is now per-station (LnMaxS below)
-	LevelFade.Reset();   // rebuild the per-sublevel light-fade map this frame
+	LevelFade.Reset();   // rebuild the per-sublevel light-fade map this frame  (MinVis + MaxVis are per-station now)
 	if (WarmupLeft < 0) WarmupLeft = ShaderWarmupFrames;   // lazy-init the shader warm-up counter
+
+	// Optional re-arm on the way back to the top. OFF by default (WarmupRearmBelow = 0): re-priming re-pays the
+	// full cost every return to 0%, which is a recurring hitch rather than a one-time startup cost.
+	if (WarmupRearmBelow > 0.f)
+	{
+		if (ZoomProgress > WarmupRearmBelow) { bWasAboveRearm = true; }
+		else if (bWasAboveRearm) { bWasAboveRearm = false; WarmupLeft = ShaderWarmupFrames; }
+	}
 
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
@@ -407,19 +608,37 @@ void AQZoomStagePawn::ApplyStations()
 			if (T != TAG_STATION && N < 0)       { N = FCString::Atoi(*Ts); }
 		}
 		if (N < 0) continue;
-		const float LnMaxS = FMath::Loge(FMath::Max(StMaxVis, MinVisScale * 2.f));
+
+		// PER-STATION handover (item 4): the simplified Handover[] entry, when enabled, overrides the global
+		// MinVis / fade-width / MaxVis for THIS station. Otherwise fall back to the globals (and the QZMaxVis
+		// tag for Dissolve, preserved for stations already tuned that way).
+		float StMinVis   = MinVisScale;
+		float StFadeW    = StationFadeWidth;
+		if (Handover.IsValidIndex(N) && Handover[N].bEnabled)
+		{
+			StMinVis = Handover[N].InitialSize;
+			StFadeW  = Handover[N].FadeIn;
+			StMaxVis = Handover[N].Dissolve;   // the struct's Dissolve beats the QZMaxVis tag
+		}
+		const float StLnMin = FMath::Loge(FMath::Max(StMinVis, 1e-30f));
+		const float LnMaxS  = FMath::Loge(FMath::Max(StMaxVis, StMinVis * 2.f));
 
 		const float S    = StationScale(N);
 		const float LogS = FMath::Loge(FMath::Max(S, 1e-30f));
-		// soft cross-fade: 1 inside the band, ramping to 0 over StationFadeWidth at each edge (prev/next dissolve).
-		const float Up = FMath::Clamp((LogS - LnMin) / FMath::Max(StationFadeWidth, 1e-3f), 0.f, 1.f);
-		const float Dn = FMath::Clamp((LnMaxS - LogS) / FMath::Max(StationFadeWidth, 1e-3f), 0.f, 1.f);
+		// soft cross-fade: 1 inside the band, ramping to 0 over the fade width at each edge (prev/next dissolve).
+		const float Up = FMath::Clamp((LogS - StLnMin) / FMath::Max(StFadeW, 1e-3f), 0.f, 1.f);
+		const float Dn = FMath::Clamp((LnMaxS - LogS) / FMath::Max(StFadeW, 1e-3f), 0.f, 1.f);
 		float Fade = Up * Dn;
 		Fade = Fade * Fade * (3.f - 2.f * Fade);   // smoothstep
 		bool bVis = (Fade > 0.002f);
 		if (Ver >= 0 && Ver != NiraVersion) bVis = false;   // inactive version -> hidden
 
-		if (ULevel* Lvl = A->GetLevel()) { float& lf = LevelFade.FindOrAdd(Lvl); lf = FMath::Max(lf, bVis ? Fade : 0.f); }
+		if (ULevel* Lvl = A->GetLevel())
+		{
+			float& lf = LevelFade.FindOrAdd(Lvl); lf = FMath::Max(lf, bVis ? Fade : 0.f);
+			TrackedLevels.Add(Lvl);   // remember every station sublevel we've ever seen, so UpdateLights can
+			                          // fade its lights OUT (to 0) on frames where the station isn't visible.
+		}
 
 		TArray<AActor*> Attached;
 		A->GetAttachedActors(Attached);
@@ -440,7 +659,15 @@ void AQZoomStagePawn::ApplyStations()
 		}
 		else if (bPrime)
 		{
-			A->SetActorTransform(FTransform(Orbit, Anchor, FVector(1e-3f)));   // subpixel dot at centre
+			// Prime at the Anchor, SUBPIXEL. Two things learned the hard way here:
+			//  1. do NOT prime in front of the camera to dodge HZB occlusion — materials without a StationFade
+			//     param (quark blockout, the SVT) cannot dissolve to nothing, so an unoccluded prime FLASHES ON
+			//     THE LENS at startup, worse than the thing it fixed.
+			//  2. do NOT raise this to "a few pixels" to force Nanite residency. That makes every hidden station
+			//     draw REAL geometry — 2.5M triangles across the set — for the whole warm-up, which tanked the
+			//     frame rate AND made popping worse, not better (Michael, twice). Subpixel is the point: it
+			//     compiles the shader and costs nothing.
+			A->SetActorTransform(FTransform(Orbit, Anchor, FVector(WarmupPrimeScale)));
 			SetStationFade(A, 0.f);                                            // masked dissolve -> invisible
 			for (AActor* Ch : Attached) SetStationFade(Ch, 0.f);
 		}
@@ -463,12 +690,16 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade)
 			NC->SetNiagaraVariableFloat(FString(TEXT("StationFade")), Fade);   // User.StationFade in the system
 			continue;
 		}
+		// NOTE: no CreateDynamicMaterialInstance here any more. Creating DMIs lazily from this per-frame loop
+		// was the startup stall — the warm-up unhides every station on frame 1, so ~144 DMIs were created and
+		// PSO-compiled at once. They are built in BuildMaterialCache() at BeginPlay now; this only SETS.
 		const int32 Num = PC->GetNumMaterials();
 		for (int32 m = 0; m < Num; ++m)
 		{
-			UMaterialInstanceDynamic* DMI = Cast<UMaterialInstanceDynamic>(PC->GetMaterial(m));
-			if (!DMI) DMI = PC->CreateDynamicMaterialInstance(m);
-			if (DMI) DMI->SetScalarParameterValue(TEXT("StationFade"), Fade);
+			if (UMaterialInstanceDynamic* DMI = Cast<UMaterialInstanceDynamic>(PC->GetMaterial(m)))
+			{
+				DMI->SetScalarParameterValue(TEXT("StationFade"), Fade);
+			}
 		}
 	}
 }
@@ -476,14 +707,25 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade)
 void AQZoomStagePawn::UpdateLights()
 {
 	UWorld* W = GetWorld();
-	if (!W || LevelFade.Num() == 0) return;
+	if (!W) return;
 	// Fade every light that lives in a station sublevel by that station's current visibility, so lights ramp
 	// in/out with the scene instead of popping on when the sublevel streams in.
+	//
+	// BUGFIX (Michael: "faded in once, won't fade out again — no re-trigger"): the old code did
+	// `if (!LevelFade.Find(level)) continue;` — so a level with NO entry this frame (its station fully out of
+	// the band, or its LevelFade left at 0) was SKIPPED, freezing its light at last-written intensity forever.
+	// Now: a missing/zero entry means fade = 0 (light OFF), which is applied like any other value. So the light
+	// ramps back down and can be re-triggered on the next pass.
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
 		AActor* A = *It;
+		// only touch lights that live in a STATION sublevel we track (skip the persistent level, sky, etc.)
+		if (!TrackedLevels.Contains(A->GetLevel())) continue;
+		// The style light is pawn-owned (LB/RB drives its absolute intensity ladder). Skip it here or the two
+		// writers fight per-frame and the shoulder buttons go erratic.
+		if (A->Tags.Contains(FName(TEXT("QZStyleLight")))) continue;
 		const float* fp = LevelFade.Find(A->GetLevel());
-		if (!fp) continue;
+		const float Fade = fp ? *fp : 0.f;   // missing entry -> 0, so the light fades OUT instead of freezing
 		TArray<ULightComponent*> Lights;
 		A->GetComponents<ULightComponent>(Lights);
 		for (ULightComponent* LC : Lights)
@@ -492,7 +734,24 @@ void AQZoomStagePawn::UpdateLights()
 			const TWeakObjectPtr<ULightComponent> Key(LC);
 			float* bp = LightBaseIntensity.Find(Key);
 			if (!bp) { bp = &LightBaseIntensity.Add(Key, LC->Intensity); }   // capture authored intensity once
-			LC->SetIntensity(*bp * (*fp));
+			// PROLONG the fade (Michael, 3x): ease the applied fade toward the station's target instead of
+			// snapping to it. LightFadeSpeed lower = slower ramp. Per-light smoothed value so each light lags.
+			float& sm = LightFadeSmoothed.FindOrAdd(Key);
+			sm = FMath::FInterpTo(sm, Fade, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
+			                      FMath::Max(LightFadeSpeed, 0.01f));
+			LC->SetIntensity(*bp * sm);
+		}
+		// Post-process volumes in a station sublevel fade too (Michael: "PP fades as well"): scale their
+		// BlendWeight by the station's visibility so the grade ramps in/out with the scene instead of popping.
+		if (APostProcessVolume* PPV = Cast<APostProcessVolume>(A))
+		{
+			const TWeakObjectPtr<AActor> Key(A);
+			float* bw = PPBaseWeight.Find(Key);
+			if (!bw) { bw = &PPBaseWeight.Add(Key, PPV->BlendWeight); }   // capture authored weight once
+			float& pps = PPFadeSmoothed.FindOrAdd(Key);
+			pps = FMath::FInterpTo(pps, Fade, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
+			                       FMath::Max(LightFadeSpeed, 0.01f));
+			PPV->BlendWeight = *bw * pps;
 		}
 	}
 }
@@ -513,12 +772,56 @@ ULightComponent* AQZoomStagePawn::GetStyleLight()
 	return nullptr;
 }
 
+void AQZoomStagePawn::ApplyNaniteDiag()
+{
+	// r.Nanite.ProxyRenderMode: 0 normal / 2 FORCE fallback / 3 FORCE full Nanite. Idempotent — safe to call
+	// every time the step is (re)set, on the primary AND every secondary, so all nodes render the hull the same.
+	static const int32 Modes[3] = { 0, 2, 3 };
+	if (IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite.ProxyRenderMode")))
+		CV->Set(Modes[FMath::Clamp(NaniteDiagStep, 0, 2)], ECVF_SetByConsole);
+}
+
 void AQZoomStagePawn::ApplyStyleLight()
 {
 	ULightComponent* LC = GetStyleLight();
 	if (!LC) return;
-	static const float Lux[6] = { 0.f, 2000.f, 5000.f, 10000.f, 25000.f, 50000.f }; // off .. full (current)
-	LC->SetIntensity(Lux[FMath::Clamp(StyleLightStep, 0, 5)]);
+
+	// The ladder is authored now (StyleLightLadder) instead of a hard-coded array, and it runs past the old
+	// 50k ceiling — Michael wants this to ADD fidelity, not cap it. Lifted out of L_QZ_S4_Density into the
+	// persistent level, so it no longer lives or dies with S4's streaming.
+	const int32 N = StyleLightLadder.Num();
+	if (N == 0) return;
+	const int32 Step = FMath::Clamp(StyleLightStep, 0, N - 1);
+	// EASE toward the target intensity instead of snapping (Michael). StyleLightEased is interpolated in Tick;
+	// here we just push the current eased value onto the light. Default step is 0 -> starts dark.
+	//
+	// ASYMMETRIC EASE (Michael: "fade-IN is still too quick, the fade-out is ok"): FInterpTo moves proportional
+	// to the remaining gap, and the ladder is huge + non-linear ({0..300000}), so a RISE from a low step covers
+	// a massive absolute range and front-loads it — the light snaps bright, then crawls. The fade-out over the
+	// same curve reads fine. So we ease UP with a SEPARATE, slower speed (StyleLightRiseSpeed) and keep the
+	// existing speed for holding/falling. Result: the fade-in takes as long as the fade-out you already like.
+	const float Target = StyleLightLadder[Step];
+	const bool  bRising = Target > StyleLightEased;
+	const float Speed   = bRising ? FMath::Max(StyleLightRiseSpeed, 0.01f)
+	                              : FMath::Max(StyleLightEaseSpeed, 0.01f);
+	StyleLightEased = FMath::FInterpTo(StyleLightEased, Target, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f, Speed);
+	LC->SetIntensity(StyleLightEased);
+
+	// Follow the subject. A point light at a FIXED spot lights a fixed volume — but the world rescales around
+	// the Anchor, so a static lamp fell out of usefulness at depth (part of why it felt limiting). Riding the
+	// Anchor with an offset keeps the key light on the hero at every scale.
+	if (AActor* LA = LC->GetOwner())
+	{
+		const FRotator Orbit(OrbitPitch, OrbitYaw, 0.f);
+		LA->SetActorLocation(Anchor + Orbit.RotateVector(StyleLightOffset));
+	}
+	// Radius scales with the current station so the falloff stays proportional to what is on screen instead
+	// of being a fixed bubble the scene outgrows.
+	if (UPointLightComponent* PLC = Cast<UPointLightComponent>(LC))
+	{
+		PLC->SetAttenuationRadius(FMath::Max(StyleLightRadius, 1.f));
+		PLC->SetCastShadows(bStyleLightShadows);   // see the header: shadows here can never cache -> huge cost
+	}
 }
 
 void AQZoomStagePawn::SetCleanMode(bool bOn)
@@ -530,6 +833,395 @@ void AQZoomStagePawn::SetCleanMode(bool bOn)
 	UStaticMeshComponent* Rules[] = { ReadoutBar, ReadoutBarFill, DetailRule };
 	for (UStaticMeshComponent* M : Rules) if (M) M->SetVisibility(!bOn);
 	if (bOn && ReadoutBG) ReadoutBG->SetVisibility(false);   // panel is off by default; only ever hide it
+}
+
+UHeterogeneousVolumeComponent* AQZoomStagePawn::GetOxVolume()
+{
+	if (OxVolume.IsValid()) return OxVolume.Get();
+	UWorld* W = GetWorld();
+	if (!W) return nullptr;
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		if (!It->Tags.Contains(FName(TEXT("QZOxSwitch")))) continue;
+		TArray<UHeterogeneousVolumeComponent*> Vols;
+		It->GetComponents<UHeterogeneousVolumeComponent>(Vols);
+		if (Vols.Num() > 0) { OxVolume = Vols[0]; Vols[0]->SetPlaying(false); return Vols[0]; }   // pawn owns the frame
+	}
+	return nullptr;
+}
+
+void AQZoomStagePawn::UpdateOxidation(float Dt)
+{
+	// primary advances the ping-pong clock (unless L3-frozen); secondaries receive OxTime via the cluster event
+	if ((bIsPrimary || !bInCluster) && !bOxFrozen)
+	{
+		OxTime += Dt;
+		if (OxTime >= OxPeriod) OxTime -= OxPeriod;
+	}
+	// triangle 0->1->0 over the period, then smootherstep -> dwell at the bonded/loosened ends, SNAP through the
+	// bond-forming middle (the "click"). frame 0 = ON (bonded S=O), frame OxFrames-1 = OFF (loosened).
+	const float Half = FMath::Max(OxPeriod * 0.5f, 0.01f);
+	float Raw = (OxTime < Half) ? (OxTime / Half) : ((OxPeriod - OxTime) / Half);
+	Raw = FMath::Clamp(Raw, 0.f, 1.f);
+	const float E = Raw * Raw * Raw * (Raw * (Raw * 6.f - 15.f) + 10.f);   // smootherstep = dwell + snap
+	const float Frame = E * (float)FMath::Max(OxFrames - 1, 1);
+
+	// FLASH FIX round 3 (Michael's 3rd recording: still a same-state BLUR pop mid-sweep, bandwidth cap didn't
+	// cure it): raising BandwidthLimit only lets the streamer TRY harder — it's still ASYNC + NON-BLOCKING, so
+	// when our smootherstep requests ~150 frames faster than I/O can install tiles, the frame renders at
+	// whatever mip is currently resident = the blur. The real cure is BLOCKING requests during the fast sweep
+	// (guarantee full mip in the SAME frame), which is affordable here: 2 small volumes, NVMe. But blocking on
+	// EVERY tick of the 3 s dwell is wasteful and can micro-stutter, so gate it on sweep SPEED: block only when
+	// the frame is moving fast (the snap), stream async during the dwell. |dFrame/dt| in frames/sec.
+	const float FrameVel = FMath::Abs(Frame - OxPrevFrame) / FMath::Max(Dt, 1e-4f);
+	OxPrevFrame = Frame;
+	const bool bSnapping = FrameVel > OxBlockFrameVel;   // during the click: force full-res
+
+	// Drive EVERY QZOxSwitch, not just the first: there are now two (the S4 deep-dive volume AND the S3
+	// MET169-focus copy). GetOxVolume cached only one, so the S3 orbital never animated.
+	if (UWorld* W = GetWorld())
+	{
+		for (TActorIterator<AActor> It(W); It; ++It)
+		{
+			if (!It->Tags.Contains(FName(TEXT("QZOxSwitch")))) continue;
+			TArray<UHeterogeneousVolumeComponent*> Vols;
+			It->GetComponents<UHeterogeneousVolumeComponent>(Vols);
+			for (UHeterogeneousVolumeComponent* HV : Vols)
+			{
+				if (!HV) continue;
+				// CLUSTER FIX: bPlaying=false made GetFrameAndIssueStreamingRequest pass bHasValidFrameRate=false,
+				// so NO frame streaming request fires — in PIE the frames are already resident (works), but in a
+				// cooked/switchboard build only frame 0 ever streams in, so the animation appears frozen.
+				// Set playing=true (this makes the streaming request fire) but immediately override Frame every
+				// tick, so OUR ping-pong drives it, not the SVT's internal clock.
+				//
+				// FLASH FIX round 1 (wrap): with bPlaying=true the component ALSO advances Frame by dt*FrameRate in
+				// its own Tick AFTER our SetFrame — and with bLooping the overshoot past the last frame Fmod-
+				// WRAPPED to ~frame 0 (bonded state flashed at the top dwell). looping OFF -> overshoot CLAMPS
+				// to the last frame instead. That killed the wrong-state flash.
+				//
+				// FLASH FIX round 2 (mip pop, Michael's 2nd recording: still a soft/bloated 1-2-frame flash near the
+				// turnarounds — the SAME state, just BLURRY, sharpening a frame later): that is the SVT streamer's
+				// bandwidth throttle, not a frame-index bug. r.SparseVolumeTexture.Streaming.BandwidthLimit
+				// defaults to 512 MiB/s and the engine documents the behaviour verbatim: "When requests exceed
+				// this limit, the system will stream at lower mip levels instead." Our smootherstep SNAPS through
+				// ~150 frames in <1 s (~187 fps peak) x ~1.4 MB/frame x TWO QZOxSwitch volumes — over budget, so
+				// the fast sweep gets served coarse mips -> the blur pop. The limit is raised in BeginPlay
+				// (every node). FrameRate here stays LOW on purpose: the streamer estimates the real rate from
+				// the frame indices it sees (GetEstimatedFrameRate), and a big value would make the component's
+				// own dt*rate advance fight our downward sweep by several frames per tick.
+				//
+				// round 3: BLOCKING requests during the snap (see above) — guarantees the requested frame is
+				// resident at full mip in this same frame, so no coarse-mip blur pop. Off during the dwell so
+				// the steady state streams async (no needless per-frame stall).
+				HV->bIssueBlockingRequests = bSnapping ? 1u : 0u;
+				HV->SetLooping(false);
+				HV->SetFrameRate(1.0f);
+				HV->SetPlaying(true);
+				HV->SetFrame(Frame);
+			}
+		}
+	}
+	UpdateS3Focus();
+}
+
+void AQZoomStagePawn::UpdateS3Focus()
+{
+	// THE FOCUS (Michael): as the dive SETTLES on MET169 (S3), the NirA hull dissolves out and the orbital
+	// SVT blooms in — same spot, same scale. It is a shift of ATTENTION, not a zoom. Driven by how close
+	// ZoomProgress is to S3's centre: focus = 0 at the station edges, 1 dead-centre on MET169.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	const float c3 = StageCentre(3);
+	// how deep INTO the S3 band we are. Width ~ half the station spacing so it eases in over the approach.
+	const float HalfBand = (StationCount > 1) ? (0.5f / (float)(StationCount - 1)) * (1.f - ZoomLeadIn) : 0.17f;
+	float f = 1.f - FMath::Clamp(FMath::Abs(ZoomProgress - c3) / FMath::Max(HalfBand * S3FocusWidth, 1e-3f), 0.f, 1.f);
+	f = f * f * (3.f - 2.f * f);   // smoothstep: gentle bloom, gentle release
+	S3Focus = f;
+
+	// Michael: just the orbital SVT at MET169 — no S3 NirA copy (it double-dissolved against the real S2
+	// NirA and popped). So the focus only blooms the orbital IN as the dive settles on MET169.
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		AActor* A = *It;
+		if (A->Tags.Contains(FName(TEXT("QZS3Orbital"))))
+		{
+			A->SetActorHiddenInGame(f < 0.01f);
+			SetStationFade(A, f);
+		}
+	}
+}
+
+void AQZoomStagePawn::BuildMaterialCache()
+{
+	// Create every DMI ONCE, up front. This is the fix for the startup stall: CreateDynamicMaterialInstance
+	// used to happen lazily inside the per-frame fade loop, so the warm-up (which unhides all six stations on
+	// frame 1) triggered ~144 DMI creations + PSO compiles simultaneously. Doing it here means the cost is
+	// paid once, at BeginPlay, before the first frame is presented — and every later frame just SETS floats.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	// Rebuild while stations are still streaming in: at BeginPlay the sublevels may not be resident yet, so a
+	// one-shot build would silently miss them and their DMIs would be created lazily on-screen again — the
+	// very stall this exists to prevent. Re-harvest until every tagged station has been seen, then stop.
+	int32 NStations = 0;
+	for (TActorIterator<AActor> It(W); It; ++It) { if (It->Tags.Contains(TAG_STATION)) ++NStations; }
+	if (bMatCacheBuilt && NStations <= MatCacheStations) return;   // nothing new appeared
+	MatCacheStations = NStations;
+	bMatCacheBuilt = true;
+	MatCache.Reset();
+	ActorMats.Reset();
+
+	auto Harvest = [this](AActor* A)
+	{
+		if (!A) return;
+		TArray<int32>& Idx = ActorMats.FindOrAdd(A);
+		TArray<UPrimitiveComponent*> Prims;
+		A->GetComponents<UPrimitiveComponent>(Prims);
+		for (UPrimitiveComponent* PC : Prims)
+		{
+			if (!PC || Cast<UNiagaraComponent>(PC)) continue;   // Niagara takes a user float, not a DMI
+			for (int32 m = 0; m < PC->GetNumMaterials(); ++m)
+			{
+				UMaterialInstanceDynamic* DMI = Cast<UMaterialInstanceDynamic>(PC->GetMaterial(m));
+				if (!DMI) DMI = PC->CreateDynamicMaterialInstance(m);
+				if (!DMI) continue;
+				FQZMat E;
+				E.DMI = DMI;
+				float Probe = 0.f;
+				E.bHasFade = DMI->GetScalarParameterValue(TEXT("StationFade"), Probe);
+				FLinearColor C;
+				if      (DMI->GetVectorParameterValue(TEXT("BaseColor"), C)) { E.ColorParam = TEXT("BaseColor"); E.BaseColor = C; }
+				else if (DMI->GetVectorParameterValue(TEXT("Color"),     C)) { E.ColorParam = TEXT("Color");     E.BaseColor = C; }
+				Idx.Add(MatCache.Add(E));
+			}
+		}
+	};
+
+	// stations + their children …
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A->Tags.Contains(TAG_STATION)) continue;
+		Harvest(A);
+		TArray<AActor*> Kids;
+		A->GetAttachedActors(Kids);
+		for (AActor* Ch : Kids) Harvest(Ch);
+	}
+	// … plus the pawn's own procedural clouds, so the palette reaches the FILLERS too (Michael: it should
+	// affect the fillers and every other scene material, not just the stations).
+	Harvest(this);
+
+	int32 NFade = 0, NCol = 0;
+	for (const FQZMat& E : MatCache) { if (E.bHasFade) ++NFade; if (E.ColorParam != NAME_None) ++NCol; }
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] material cache: %d DMIs (%d fadeable, %d coloured) across %d actors "
+		"— built ONCE at BeginPlay instead of lazily during the warm-up"), MatCache.Num(), NFade, NCol, ActorMats.Num());
+}
+
+void AQZoomStagePawn::ApplyPalette()
+{
+	// Re-apply only when the width actually changes.
+	if (FMath::IsNearlyEqual(PaletteApplied, PaletteWidth, 1e-4f)) return;
+	PaletteApplied = PaletteWidth;
+	if (!bMatCacheBuilt) return;   // nothing to tint until the cache exists
+
+	auto Squeeze = [this](const FLinearColor& In) -> FLinearColor
+	{
+		FLinearColor HSV = In.LinearRGBToHSV();          // H in DEGREES (0..360), S/V 0..1
+		const float H = HSV.R, S = HSV.G, V = HSV.B;
+		if (S < 0.02f) return In;                        // greys carry no hue — squeezing them does nothing
+
+		// signed shortest distance to each pole, then pick the NEARER one. Squeezing toward a single global
+		// centre would collapse the amber/blue structure the palette is built on (golds -> green).
+		auto Delta = [](float A, float B) { return FMath::UnwindDegrees(A - B); };
+		const float dA = Delta(H, PaletteHueA), dB = Delta(H, PaletteHueB);
+		const float Pole = (FMath::Abs(dA) <= FMath::Abs(dB)) ? PaletteHueA : PaletteHueB;
+		const float d    = (FMath::Abs(dA) <= FMath::Abs(dB)) ? dA : dB;
+
+		const float NewH = Pole + d * PaletteWidth;                       // width 1 = authored, 0 = on the pole
+		const float Tight = 1.f - FMath::Clamp(PaletteWidth, 0.f, 1.f);   // 0 = authored .. 1 = fully squeezed
+		const float NewS = FMath::Lerp(S, PaletteSatTarget, Tight * PaletteSatAmount);
+
+		FLinearColor Out = FLinearColor(FMath::UnwindDegrees(NewH) < 0.f ? FMath::UnwindDegrees(NewH) + 360.f
+		                                                                 : FMath::UnwindDegrees(NewH),
+		                                FMath::Clamp(NewS, 0.f, 1.f), V, HSV.A).HSVToLinearRGB();
+		Out.A = In.A;
+		return Out;
+	};
+
+	// Walk the CACHE, not the world: no iteration, no DMI creation, no GetVectorParameterValue probing.
+	// The cache covers the stations, their children AND the pawn's own filler clouds — so the squeeze now
+	// reaches the fillers and every other scene material, which is what Michael asked for.
+	int32 N = 0;
+	for (const FQZMat& E : MatCache)
+	{
+		if (E.ColorParam == NAME_None) continue;
+		UMaterialInstanceDynamic* DMI = E.DMI.Get();
+		if (!DMI) continue;
+		// always derive from the AUTHORED colour captured at build time — never from the current value, which
+		// would compound press-on-press and drift to mud.
+		DMI->SetVectorParameterValue(E.ColorParam, Squeeze(E.BaseColor));
+		++N;
+	}
+	UE_LOG(LogTemp, Log, TEXT("[QZoomStage] palette width %.2f -> %d params (poles %.0f / %.0f)"),
+		PaletteWidth, N, PaletteHueA, PaletteHueB);
+}
+
+void AQZoomStagePawn::ApplyNiraShells()
+{
+	// SM_S2_NirA carries 'ribbon' + 'mat_volume' slots: surfaces that ENCLOSE the whole protein. MET169 sits
+	// at the centre, so on the way into S3 you view the residue from inside them and they obscure it. The
+	// high-res variant has no such slots (atoms only) — that asymmetry is why the two versions disagree.
+	// Toggled by SLOT so the C/N/O/S atoms are never touched. Applied once, and again whenever the flag flips.
+	if (bNiraShellsApplied == bNiraShells) return;
+	bNiraShellsApplied = bNiraShells;
+	UWorld* W = GetWorld();
+	if (!W) return;
+	UMaterialInterface* Ribbon = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/MI_Nira_ribbon.MI_Nira_ribbon"));
+	UMaterialInterface* Volume = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/MI_Nira_volume.MI_Nira_volume"));
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		TArray<UStaticMeshComponent*> Meshes;
+		It->GetComponents<UStaticMeshComponent>(Meshes);
+		for (UStaticMeshComponent* MC : Meshes)
+		{
+			UStaticMesh* SM = MC ? MC->GetStaticMesh() : nullptr;
+			if (!SM || !SM->GetName().Equals(TEXT("SM_S2_NirA"))) continue;
+			const TArray<FStaticMaterial>& Slots = SM->GetStaticMaterials();
+			for (int32 i = 0; i < Slots.Num(); ++i)
+			{
+				const FString N = Slots[i].MaterialSlotName.ToString();
+				const bool bShell = N.Contains(TEXT("volume")) || N.Equals(TEXT("Material_0"));   // mat_volume + ribbon
+				if (!bShell) continue;
+				if (bNiraShells) MC->SetMaterial(i, N.Contains(TEXT("volume")) ? Volume : Ribbon);
+				else             MC->SetMaterial(i, nullptr);   // null = slot draws nothing
+			}
+			UE_LOG(LogTemp, Log, TEXT("[QZoomStage] NirA shells %s"), bNiraShells ? TEXT("SHOWN") : TEXT("hidden"));
+		}
+	}
+}
+
+void AQZoomStagePawn::ApplyFreeLook(float Yaw, float Pitch)
+{
+	// nDisplay builds every viewport's frustum from the DCRA's transform, NOT the pawn's Camera. So in a
+	// cluster, rotating the Camera does nothing on the wall — the fix is to rotate the DCRA. We rotate it
+	// about its OWN pivot (a head turn in place), preserving its authored base transform.
+	if (!DCRA.IsValid())
+	{
+		if (UWorld* W = GetWorld())
+			DCRA = Cast<AActor>(UGameplayStatics::GetActorOfClass(W, ADisplayClusterRootActor::StaticClass()));
+		if (DCRA.IsValid())
+		{
+			DCRABaseRot = DCRA->GetActorRotation();   // capture the authored orientation ONCE
+			DCRABaseSet = true;
+			// Deep Space has SEPARATE view origins per viewport: VP_Wall reads DefaultViewPoint (the DCRA
+			// root), VP_Floor reads a distinct FloorViewpoint component. Rotating the ACTOR only turned the
+			// wall — the floor kept its own component's rotation. So we collect EVERY scene component under
+			// the DCRA whose name looks like a view point and rotate each, capturing its base once.
+			DCRAViewpoints.Reset(); DCRAViewpointBase.Reset();
+			TArray<USceneComponent*> Comps;
+			DCRA->GetComponents<USceneComponent>(Comps);
+			for (USceneComponent* C : Comps)
+			{
+				if (!C) continue;
+				const FString N = C->GetName();
+				if (N.Contains(TEXT("ViewPoint")) || N.Contains(TEXT("Viewpoint")) || N.Contains(TEXT("ViewOrigin")))
+				{
+					DCRAViewpoints.Add(C);
+					DCRAViewpointBase.Add(C->GetRelativeRotation());
+				}
+			}
+		}
+	}
+
+	const FQuat Offset = FRotator(Pitch, Yaw, 0.f).Quaternion();
+
+	if (DCRA.IsValid() && DCRABaseSet)
+	{
+		// rotate the actor (drives DefaultViewPoint = the wall) …
+		DCRA->SetActorRotation((DCRABaseRot.Quaternion() * Offset).Rotator());
+		// … AND every named viewpoint component (drives the floor + any other node) about its own base.
+		for (int32 i = 0; i < DCRAViewpoints.Num(); ++i)
+		{
+			if (USceneComponent* C = DCRAViewpoints[i].Get())
+				C->SetRelativeRotation((DCRAViewpointBase[i].Quaternion() * Offset).Rotator());
+		}
+	}
+	if (Camera)
+	{
+		Camera->SetRelativeRotation(FRotator(Pitch, Yaw, 0.f));   // the PIE viewport
+	}
+}
+
+void AQZoomStagePawn::UpdateGuides()
+{
+	if (!bShowFrontIndicator)
+	{
+		if (GuideISM)       GuideISM->SetVisibility(false);
+		if (GuideCentreISM) GuideCentreISM->SetVisibility(false);
+		return;
+	}
+
+	UStaticMesh* Cube   = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_Accent.M_Accent"));
+	if (!Cube || !Sphere) return;
+
+	auto MakeGuide = [&](TObjectPtr<UInstancedStaticMeshComponent>& Slot, TObjectPtr<UMaterialInstanceDynamic>& MidSlot,
+	                     UStaticMesh* M, int32 Count)
+	{
+		if (Slot) return;
+		Slot = NewObject<UInstancedStaticMeshComponent>(this);
+		Slot->SetMobility(EComponentMobility::Movable);
+		Slot->SetupAttachment(RootComponent);
+		Slot->RegisterComponent();
+		Slot->SetCastShadow(false);
+		Slot->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Slot->SetStaticMesh(M);
+		if (Mat)
+		{
+			MidSlot = UMaterialInstanceDynamic::Create(Mat, this);
+			Slot->SetMaterial(0, MidSlot);
+		}
+		for (int32 i = 0; i < Count; ++i) Slot->AddInstance(FTransform::Identity);
+	};
+	MakeGuide(GuideISM,       GuideFrontMID,  Cube,   9);   // 8 shaft segments + 1 head
+	MakeGuide(GuideCentreISM, GuideCentreMID, Sphere, 3);   // 3 nested reticle rings at the Anchor
+	if (!GuideISM || !GuideCentreISM) return;
+	GuideISM->SetVisibility(true);
+	GuideCentreISM->SetVisibility(true);
+
+	// ── the FRONT arrow: deliberately NOT orbited ──────────────────────────────────────────────────────
+	// Stations get (Orbit, Anchor, Scale) every frame; this does not. It marks the ROOM, so it must stay put
+	// while the subject turns under it — that IS the alignment reference. Orbiting it would make it useless.
+	const FVector Dir = bAimFrontAtViewpoint ? (RoomViewpoint - Anchor).GetSafeNormal()
+	                                         : FrontDirection.GetSafeNormal();
+	const float   Seg = FrontIndicatorSize / 9.f;
+	const float   Th  = FMath::Max(FrontIndicatorSize * 0.018f, 1.f);   // shaft thickness
+	for (int32 i = 0; i < 8; ++i)
+	{
+		// dashed shaft: pointing FROM the subject TOWARD the audience
+		const FVector P = Anchor + Dir * (Seg * (i + 1.4f));
+		const FTransform T(Dir.Rotation(), P, FVector(Seg * 0.055f, Th * 0.02f, Th * 0.02f));
+		GuideISM->UpdateInstanceTransform(i, T, true, false, false);
+	}
+	// arrow head — a flattened block at the far end, reading as a wedge toward the room
+	{
+		const FVector P = Anchor + Dir * (FrontIndicatorSize * 1.02f);
+		const FTransform T(Dir.Rotation(), P, FVector(Seg * 0.09f, Th * 0.055f, Th * 0.055f));
+		GuideISM->UpdateInstanceTransform(8, T, true, true, false);
+	}
+	if (GuideFrontMID) GuideFrontMID->SetVectorParameterValue(TEXT("Color"), FrontIndicatorColor);
+
+	// ── the zoom-CENTRE reticle: three nested shells at the Anchor ─────────────────────────────────────
+	// Sized off the CURRENT nearest station scale so it stays legible at every depth instead of vanishing
+	// or swallowing the frame — the "hard to adjust exactly" part.
+	for (int32 i = 0; i < 3; ++i)
+	{
+		const float R = FrontIndicatorSize * (0.012f + 0.020f * i);
+		const FTransform T(FRotator::ZeroRotator, Anchor, FVector(R / 50.f));   // engine Sphere r=50
+		GuideCentreISM->UpdateInstanceTransform(i, T, true, (i == 2), false);
+	}
+	if (GuideCentreMID) GuideCentreMID->SetVectorParameterValue(TEXT("Color"), CentreIndicatorColor * 0.5f);
 }
 
 float AQZoomStagePawn::CurrentScaleMeters() const
@@ -574,11 +1266,31 @@ void AQZoomStagePawn::UpdateReadout()
 	                                     TEXT("P5"), TEXT("P6"), TEXT("P7"), TEXT("P8"), TEXT("P9") };
 	static const TCHAR* FillNames[4] = { TEXT("off"), TEXT("proteins"), TEXT("enzymes"), TEXT("full medium") };
 	static const TCHAR* DensNames[5] = { TEXT("sparse"), TEXT("normal"), TEXT("dense"), TEXT("swarm"), TEXT("EXTREME") };
+	// PALETTE line only shows once squeezed — no clutter at the authored default.
+	const FString PalLine = (PaletteWidth < 0.999f)
+		? FString::Printf(TEXT("\nPALETTE    %.0f%%"), PaletteWidth * 100.f) : FString();
+	// NANITE diagnostic line only shows when R3 has cycled off 'normal', so it's invisible in normal use.
+	// Now it also reports the RUNTIME truth on THIS node so a wall-vs-PIE difference is readable directly:
+	// the feature level (Nanite needs SM6 — if the node is SM5 that is the whole bug), whether r.Nanite is on,
+	// and the live ProxyRenderMode. If PIE looks right and the wall doesn't, this line says why.
+	static const TCHAR* NaniteNames[3] = { TEXT("normal"), TEXT("FORCE fallback"), TEXT("FORCE full") };
+	FString NanLine;
+	if (NaniteDiagStep != 0)
+	{
+		int32 NaniteOn = -1, ProxyMode = -1;
+		if (IConsoleVariable* CvN = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite")))            NaniteOn  = CvN->GetInt();
+		if (IConsoleVariable* CvP = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite.ProxyRenderMode"))) ProxyMode = CvP->GetInt();
+		const ERHIFeatureLevel::Type FL = (GetWorld() && GetWorld()->Scene) ? GetWorld()->Scene->GetFeatureLevel() : ERHIFeatureLevel::Num;
+		const TCHAR* FLName = (FL == ERHIFeatureLevel::SM6) ? TEXT("SM6")
+		                    : (FL == ERHIFeatureLevel::SM5) ? TEXT("SM5(!Nanite)") : TEXT("other");
+		NanLine = FString::Printf(TEXT("\nNANITE     %s  |  FL %s  r.Nanite=%d  proxy=%d"),
+			NaniteNames[FMath::Clamp(NaniteDiagStep, 0, 2)], FLName, NaniteOn, ProxyMode);
+	}
 	Readout->SetText(FText::FromString(FString::Printf(
-		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s\nFILLERS    %s  [%s]"),
+		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s\nFILLERS    %s  [%s]%s%s"),
 		*FormatScale(ObserverSize), *FormatRate(ObserverSpeed), *FormatZoom(Power), ZoomProgress * 100.f,
 		PPNames[FMath::Clamp(PPPreset, 0, 9)], FillNames[FMath::Clamp(FillerMode, 0, 3)],
-		DensNames[FMath::Clamp(FillerDensity, 0, 4)])));
+		DensNames[FMath::Clamp(FillerDensity, 0, 4)], *PalLine, *NanLine)));
 
 	// Drive the progress FILL: grows from the fixed left end (ReadoutBarLeft) toward the right.
 	if (ReadoutBarFill)
@@ -838,8 +1550,15 @@ void AQZoomStagePawn::InitFillers()
 {
 	UStaticMesh* Sph  = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-	UMaterialInterface* Emis = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_Filler.M_Filler"));
-	if (!Emis) Emis = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_Accent.M_Accent"));  // fallback
+	// FILLER MATERIAL: M_FillerGlow — a dedicated Unlit + ADDITIVE + one-sided material so the medium is (a) cheap
+	// (no deferred lighting on thousands of instances, no masked-clip, half the fragments vs the two-sided master)
+	// and (b) FUSED-looking: a soft Fresnel core makes each sphere a glow that ADDS with its neighbours, so the
+	// cloud reads as one continuous mass instead of discrete balls — Michael's "give them a hull". It still exposes
+	// BaseColor (palette squeeze) + StationFade (grow-and-fade), so all the existing wiring keeps working.
+	// Falls back to the lit master, then M_Filler, if the glow material is missing.
+	UMaterialInterface* Emis = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_FillerGlow.M_FillerGlow"));
+	if (!Emis) Emis = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_StationMaster.M_StationMaster"));
+	if (!Emis) Emis = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_Filler.M_Filler"));
 	UMaterialInterface* Dim  = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_UIPanel.M_UIPanel"));
 	FRandomStream R(20260705);   // FIXED seed → identical scatter on every cluster node (no wall/floor desync)
 
@@ -850,8 +1569,19 @@ void AQZoomStagePawn::InitFillers()
 		C->SetupAttachment(RootComponent);
 		C->RegisterComponent();
 		C->SetWorldLocation(Anchor);                   // pivot AT the subject -> swirl/scale happen around it
+		// CHEAP MEDIUM (Michael: "kill the perf but keep the density"): the fillers glow on their own, so they
+		// don't need to cast, receive, or feed ANY lighting. Turning all of it off is most of the win at density.
 		C->SetCastShadow(false);
+		C->bCastDynamicShadow = false;
+		C->bCastStaticShadow = false;
+		C->bAffectDynamicIndirectLighting = false;
+		C->bAffectDistanceFieldLighting = false;
+		C->SetReceivesDecals(false);
+		C->bReceivesDecals = false;
 		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		C->SetCanEverAffectNavigation(false);
+		// LOD-free spheres are cheap per-instance; keep them from being culled-then-repopped every frame by the
+		// aggressive scale animation (WorldPositionOffset-free), so no per-frame proxy rebuild.
 		if (M)   C->SetStaticMesh(M);
 		if (Mat) C->SetMaterial(0, Mat);
 		return C;
@@ -924,10 +1654,21 @@ void AQZoomStagePawn::InitFillers()
 		AddWorm(Worm, s, R.FRandRange(800.f, 1600.f), 24, R.FRandRange(0.55f, 0.95f));
 	}
 	FillerGrid = nullptr;   // grid retired — the medium is now proteins + enzymes
-	// dynamic material instances so we can drive FillerFade (opacity) per frame
+	// DMIs so we can drive the fade per frame — and, now that the medium runs on M_StationMaster, so it has a
+	// real authored BaseColor for the palette to squeeze FROM. Two different colours on purpose: the proteins
+	// sit on the blue pole and the enzymes on the amber one, so the medium reads as part of the same palette
+	// rather than a separate layer, and it responds to the squeeze like everything else.
 	if (Motes) FillerMotesMID  = Motes->CreateDynamicMaterialInstance(0);
 	if (Worm)  FillerStructMID = Worm ->CreateDynamicMaterialInstance(0);
+	if (FillerMotesMID)  FillerMotesMID ->SetVectorParameterValue(TEXT("BaseColor"), FillerColorMotes);
+	if (FillerStructMID) FillerStructMID->SetVectorParameterValue(TEXT("BaseColor"), FillerColorStruct);
 	SetFillerMode(FillerMode);   // re-apply visibility (this runs on density rebuilds too)
+
+	// A/B re-run InitFillers to rebuild the cloud, which recreates these DMIs — so the material cache and the
+	// palette must be re-derived, or the squeeze silently stops applying to the new instances.
+	bMatCacheBuilt = false;
+	MatCacheStations = -1;
+	PaletteApplied = -1.f;
 	UE_LOG(LogTemp, Log, TEXT("[QZoomStage] fillers built @dens[%d]x%.2f: proteins=%d atoms, enzymes=%d beads"),
 		FillerDensity, dens, Motes ? Motes->GetInstanceCount() : 0, Worm ? Worm->GetInstanceCount() : 0);
 }
@@ -968,7 +1709,14 @@ void AQZoomStagePawn::UpdateFillers(float Dt)
 	// SIZE grows MONOTONICALLY with the dive (never shrinks — shrinking breaks immersion). As you push past
 	// NirA toward MET169 the medium enlarges and passes the camera; it disappears by FADING (FillerFade), not
 	// by shrinking. Growth is anchored at the NirA centre so the medium reads "relative to NirA" there.
-	const float fs = FMath::Clamp(FMath::Exp((ZoomProgress - c2) * 2.4f), 0.5f, 12.0f);
+	//
+	// The growth rate is DERIVED FROM THE WORLD'S OWN K (Michael: "the scaling of the fillers needs to match
+	// the zoom"). It used to be a hard-coded 2.4 against a world ZoomK of 12 — i.e. the medium grew 5x slower
+	// than everything around it and then hit a 12x ceiling, so it visibly lagged and then froze while the
+	// scene kept rushing past. Tracking LocalK() keeps the medium on the same curve as the stations, at
+	// FillerScaleRatio of their rate (1.0 = exactly the world's rate; < 1 = the medium reads as "further out").
+	const float fs = FMath::Clamp(FMath::Exp((ZoomProgress - c2) * LocalK() * FillerScaleRatio),
+	                              FillerScaleMin, FillerScaleMax);
 	const FVector FScale(fs);
 	const bool bBand = presence > 0.005f;
 
@@ -992,6 +1740,11 @@ void AQZoomStagePawn::UpdateFillers(float Dt)
 		FillerStruct->SetWorldScale3D(FScale);
 	}
 	// fade via OPACITY (FillerFade) — grow-and-fade, not shrink
-	if (FillerMotesMID)  FillerMotesMID ->SetScalarParameterValue(TEXT("FillerFade"), presence);
-	if (FillerStructMID) FillerStructMID->SetScalarParameterValue(TEXT("FillerFade"), presence);
+	// Write BOTH names: the medium moved from M_Filler (param 'FillerFade') to M_StationMaster (param
+	// 'StationFade') so the palette could tint it. Setting a name a material does not expose is a harmless
+	// no-op, so this keeps the dissolve working on either master rather than silently breaking it.
+	if (FillerMotesMID)  { FillerMotesMID ->SetScalarParameterValue(TEXT("FillerFade"), presence);
+	                       FillerMotesMID ->SetScalarParameterValue(TEXT("StationFade"), presence); }
+	if (FillerStructMID) { FillerStructMID->SetScalarParameterValue(TEXT("FillerFade"), presence);
+	                       FillerStructMID->SetScalarParameterValue(TEXT("StationFade"), presence); }
 }

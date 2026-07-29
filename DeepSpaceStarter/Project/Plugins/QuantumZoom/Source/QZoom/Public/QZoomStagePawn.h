@@ -6,6 +6,36 @@
 #include "Cluster/IDisplayClusterClusterManager.h"
 #include "QZoomStagePawn.generated.h"
 
+/**
+ * FQZHandover — the SIMPLIFIED per-station tuning set Michael asked for (item 4). One entry per station.
+ * Everything that shapes how a station HANDS OVER from the previous one, in one place, instead of the four
+ * scattered globals (StationZoomK / MinVisScale / MaxVisScale / StationFadeWidth). Leave Enabled off to
+ * fall back to the global behaviour for that station.
+ */
+USTRUCT(BlueprintType)
+struct FQZHandover
+{
+	GENERATED_BODY()
+
+	/** Use this per-station override. Off = the station uses the global StationZoomK / MinVis / fade values. */
+	UPROPERTY(EditAnywhere, Category="Handover") bool bEnabled = false;
+
+	/** TIMING — how steep this station's growth is. Higher = it stays a tiny dot longer, then blooms fast
+	 *  (later, snappier handover). This is the per-station ZoomK. */
+	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="1.0", ClampMax="80.0")) float Timing = 12.f;
+
+	/** INITIAL RESIZE — how small the station first appears (its 'dot' size when it blooms in). Smaller =
+	 *  it starts tinier and further away. This is the per-station MinVisScale. */
+	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="0.001", ClampMax="1.0")) float InitialSize = 0.03f;
+
+	/** FADE IN — width of the appear ramp (log-scale). Bigger = a longer, softer dissolve-IN. */
+	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="0.1", ClampMax="6.0")) float FadeIn = 2.2f;
+
+	/** DISSOLVE (out) — the scale at which the station fades OUT as the next one takes over. Bigger = it
+	 *  lingers longer before dissolving. This is the per-station MaxVis (like the QZMaxVis tag). */
+	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="1.0")) float Dissolve = 35.f;
+};
+
 class UCameraComponent;
 class USceneComponent;
 class UTextRenderComponent;
@@ -18,6 +48,7 @@ class USoundBase;
 class UAudioComponent;
 class APostProcessVolume;
 class ULightComponent;
+class UHeterogeneousVolumeComponent;
 
 /**
  * AQZoomStagePawn — "the world scales, the camera stays."
@@ -68,6 +99,36 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="1.0", ClampMax="80.0"))
 	float ZoomK = 12.f;
 
+	/** PER-STATION zoom steepness — the dial for how each individual leg FEELS. Index-aligned to the stations;
+	 *  any entry <= 0 (or a short/empty array) falls back to the global ZoomK, so leaving this empty preserves
+	 *  the old uniform behaviour exactly.
+	 *
+	 *  WHY PER-STATION AND NOT ONE GLOBAL SLIDER: the legs are wildly unequal in reality —
+	 *      S0->S1  9cm -> 3um    ~4.5 decades
+	 *      S1->S2  3um -> 10nm   ~2.5
+	 *      S2->S3  10nm -> 0.2nm ~1.7
+	 *      S3->S4  0.2nm -> 1A   ~0.3   <- barely a scale change: a shift of DESCRIPTION, not a dive
+	 *      S4->S5  1A -> 8fm     ~6.1   <- the huge plunge into the subatomic void
+	 *  StageCentre() spaces all six EVENLY, so a single K gives the 0.3-decade step and the 6.1-decade abyss
+	 *  identical travel. Lower K on S4 = slow, cinematic, perceptual. Higher K on S5 = dramatic bridging of
+	 *  the real distance. One global knob cannot express both.
+	 *
+	 *  NOTE: MinVisScale/MaxVisScale/QZMaxVis are log-scale bands that assume a uniform K, so changing a
+	 *  station's K also moves WHEN it fades in/out — expect to re-tune its QZMaxVis after a big change. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel")
+	TArray<float> StationZoomK;
+
+	/** SIMPLIFIED per-station handover tuning (item 4): timing / initial resize / fade-in / dissolve, one
+	 *  entry per station. An entry with bEnabled=true overrides the scattered globals for that station.
+	 *  Index-aligned to the stations (0=Lab .. 5=Quarks). Empty/disabled = old global behaviour. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Handover")
+	TArray<FQZHandover> Handover;
+
+	/** Global multiplier on every station's effective K — the single "zoom intensity" dial, on top of whatever
+	 *  StationZoomK/ZoomK resolve to. 1 = as authored. Handy for dialling the whole descent in one go. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel", meta=(ClampMin="0.1", ClampMax="4.0"))
+	float ZoomIntensity = 1.0f;
+
 	/** Hide a station whose display scale leaves this band (below = a dot, above = engulfing you). Low
 	 *  MinVis = the next station appears early (as a growing detail) so there's never an empty frame. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.001"))
@@ -90,8 +151,153 @@ public:
 	 *  a subpixel scale — so its material shaders/PSOs compile up front instead of flashing the default grey
 	 *  material for a few frames the first time it enters the band. 0 = off. ~90 = ~1.5 s at 60 fps. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0"))
-	int32 ShaderWarmupFrames = 90;
+	int32 ShaderWarmupFrames = 240;
 	int32 WarmupLeft = -1;   // runtime counter, lazy-init from ShaderWarmupFrames on first ApplyStations
+
+	/** Scale used to prime a not-yet-visible station during warm-up. MUST stay subpixel (1e-3). I raised this
+	 *  to 0.02 to try to force Nanite residency and it was a bad trade: every hidden station then draws real
+	 *  geometry (2.5M tris across the set) for the whole warm-up — the frame rate collapsed and the popping got
+	 *  WORSE. The prime exists to compile shaders, nothing more; it must cost ~zero. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0001"))
+	float WarmupPrimeScale = 0.001f;
+
+	/** Re-arm the warm-up when ZoomProgress returns below this. 0 = OFF (one-shot at launch only), which is the
+	 *  default: re-arming re-pays the whole prime cost every time the zoom returns to the top, and with a
+	 *  non-trivial prime scale that is a recurring hitch rather than a one-time startup cost. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage")
+	float WarmupRearmBelow = 0.f;
+	bool bWasAboveRearm = false;
+
+	// ── FRONT-FACING indicator ───────────────────────────────────────────────────────────────────────────
+	// A fixed marker for where the WALL's front (the audience) is, sitting alongside the zoom centre at the
+	// Anchor. It does NOT orbit: the subject turns under it, so it reads as "this edge faces the room".
+	// Derived from the nDisplay config, not guessed: TF_Root (330,0,-180) + TF_Wall (422.5,0,422.5) puts the
+	// wall plane at X=752.5 with yaw 0 (facing +X), the viewpoint at the origin, and the Anchor at X=1500 —
+	// i.e. the subject sits BEYOND the wall and the audience looks down +X. So "front" = -X from the subject.
+	//
+	// Pawn-owned ON PURPOSE: the per-station GUIDE_center/GUIDE_volume actors have no StationFade param, so
+	// they cannot dissolve — one indicator on the pawn avoids six copies fighting the fade system.
+	/** Show the front-facing marker + zoom-centre reticle (an authoring aid — turn OFF for the show). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides") bool bShowFrontIndicator = false;
+	/** Direction of the audience/wall front, from the subject. Default -X = the room's horizontal bearing,
+	 *  derived from the nDisplay layout. NOTE the true line from the Anchor (z=650) to the viewpoint (z=0)
+	 *  tilts down 23.4°; flat -X is its horizontal projection, which is usually what you want for a
+	 *  "which edge faces the room" marker. Tick bAimFrontAtViewpoint below for the exact eye-line instead. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides") FVector FrontDirection = FVector(-1.f, 0.f, 0.f);
+	/** Aim the arrow at the actual nDisplay viewpoint (the origin) instead of using flat FrontDirection —
+	 *  the true eye-line, tilted ~23° down from the Anchor. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides") bool bAimFrontAtViewpoint = false;
+	/** The room's viewpoint in world space (nDisplay DefaultViewPoint = the origin). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides") FVector RoomViewpoint = FVector(0.f, 0.f, 0.f);
+	/** Length of the front arrow in world units. Default 900 so it visibly CROSSES the wall plane (X=752.5,
+	 *  i.e. 747 UU in front of the Anchor) — at 600 it stopped short and read as floating behind the screen. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides", meta=(ClampMin="10.0")) float FrontIndicatorSize = 900.f;
+	/** Colour of the front arrow. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides") FLinearColor FrontIndicatorColor = FLinearColor(1.f, 0.25f, 0.1f);
+	/** Colour of the zoom-centre reticle at the Anchor. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Guides") FLinearColor CentreIndicatorColor = FLinearColor(0.02f, 0.91f, 0.83f);
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> GuideISM = nullptr;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> GuideFrontMID = nullptr;
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> GuideCentreISM = nullptr;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> GuideCentreMID = nullptr;
+	bool bGuidePrev = false;   // F2 edge-detect
+
+	/** NirA outer shells (the 'ribbon' + 'VOLUME' surfaces on SM_S2_NirA). They ENCLOSE the whole protein, and
+	 *  MET169 sits at its centre — so at the S2->S3 hand-off you are looking at the residue from INSIDE them
+	 *  and they obscure it (Michael). Only variant 2 has these slots; the high-res version is atoms only,
+	 *  which is why the versions disagree. false = hide the shells so all three read the same.
+	 *  Hidden by SLOT (swapping in a null material), so the C/N/O/S atoms are untouched. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|NirA") bool bNiraShells = false;
+	bool bNiraShellsApplied = false;
+
+	// ── PALETTE squeeze ──────────────────────────────────────────────────────────────────────────────────
+	// Michael: "the overall material color is too spread — I need a tighter color palette", ideally on the
+	// controller. Measured, the authored palette spans 240 deg of hue — but NOT randomly: it sits in two
+	// poles, amber/gold (~40 deg, 7 params) and blue (~215 deg, 7 params), with the reds (O, 0 deg), the
+	// green mold (92 deg) and the teals (168-193 deg) breaking them.
+	//
+	// So this squeezes each colour toward its NEAREST pole, not toward one global centre. Collapsing to a
+	// single centre destroys the amber/blue relationship the palette is built on (at width 0.5 the golds
+	// land on 125 deg = green — verified by modelling it against the real values first).
+	// PaletteWidth 1 = as authored; 0 = every colour snapped onto its pole. Measured concentration:
+	// 1.0 -> R=0.10 (the current spread) ... 0.35 -> R=0.81 ... 0.15 -> R=0.96 (near-monochrome).
+	/** 1 = authored palette, 0 = fully collapsed onto the two poles. R3 resets to 1; Back/Start step it. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Palette", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float PaletteWidth = 1.f;
+	/** The two hue poles the palette is squeezed toward, in degrees. Defaults measured from the assets. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Palette", meta=(ClampMin="0.0", ClampMax="360.0"))
+	float PaletteHueA = 40.f;    // amber/gold: S, HL, agar, MET169, density
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Palette", meta=(ClampMin="0.0", ClampMax="360.0"))
+	float PaletteHueB = 215.f;   // blue: N, C, dish, cell, NirA, quarks
+	/** Pull saturation toward this as the palette tightens (1 = leave saturation alone). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Palette", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float PaletteSatTarget = 0.55f;
+	/** How much of the saturation move to apply at full squeeze. 0 = hue only. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Palette", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float PaletteSatAmount = 0.6f;
+	/** Step size for the Back/Start buttons. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Palette", meta=(ClampMin="0.01", ClampMax="0.5"))
+	float PaletteStep = 0.1f;
+	float PaletteApplied = -1.f;              // last-applied width (re-apply only on change)
+	bool  bPalMinusPrev = false, bPalPlusPrev = false, bPalResetPrev = false;
+	int32 NaniteDiagStep = 0;        // R3 cycles r.Nanite.ProxyRenderMode: 0 normal / 2 fallback / 3 full-Nanite
+	bool  bNaniteDiagPrev = false;
+
+	// ── DMI CACHE ────────────────────────────────────────────────────────────────────────────────────────
+	// THE STARTUP STALL: SetStationFade ran CreateDynamicMaterialInstance() on first touch of every material
+	// slot, from inside a per-frame loop over every station + child. The warm-up unhides all six stations at
+	// frame 1, so ~144 DMIs were created AT ONCE, each forcing a shader/PSO compile — a multi-second hitch
+	// that vanished once they were all cached. Exactly Michael's "weak at the start, then smooth".
+	// Now: build every DMI ONCE (BuildMaterialCache), then only ever SET parameters on them.
+	struct FQZMat
+	{
+		TWeakObjectPtr<UMaterialInstanceDynamic> DMI;
+		FLinearColor BaseColor = FLinearColor::White;   // authored colour, for the palette squeeze
+		FName ColorParam = NAME_None;                   // "BaseColor" / "Color" / none
+		bool  bHasFade = false;                         // exposes StationFade?
+	};
+	TArray<FQZMat> MatCache;
+	TMap<TWeakObjectPtr<AActor>, TArray<int32>> ActorMats;   // actor -> indices into MatCache
+	bool bMatCacheBuilt = false;
+	int32 MatCacheStations = -1;   // station count the cache was built for; grows as sublevels stream in
+	void BuildMaterialCache();
+
+	// ── HITCH DIAGNOSTICS ────────────────────────────────────────────────────────────────────────────────
+	// The startup stall has survived four fixes. This logs any slow frame and splits the time into "inside
+	// this pawn's Tick" vs "outside it" — the outside number covers the render thread, GPU, streaming and
+	// PSO compiles. Whichever side is large IS the answer, instead of another guess.
+	/** Log frames slower than HitchMs. Leave ON until the stall is found; it costs nothing when quiet. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Debug") bool bLogHitches = true;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Debug", meta=(ClampMin="4.0")) float HitchMs = 33.f;
+	int32 HitchesLogged = 0;
+
+
+	// ── LEFT-STICK FREE LOOK ─────────────────────────────────────────────────────────────────────────────
+	// Michael: left stick turns the CAMERA (free look) while the orbit POSITION stays locked to the zoom
+	// path — the viewer holds their spot and turns their head. After 2 s of no input, ease smoothly back to
+	// looking dead centre. Distinct from the right stick, which ORBITS the world around the anchor.
+	// NOTE (nDisplay): this rotates the pawn's Camera component. In PIE that turns the view; in a real
+	// Deep Space cluster the DCRA defines the frustum, so this MUST be verified on the wall — it may need to
+	// drive the DCRA's view rotation instead. Flagged, not assumed.
+	/** Free-look speed, degrees/sec at full stick deflection. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|FreeLook", meta=(ClampMin="0.0")) float FreeLookRate = 55.f;
+	/** Max yaw/pitch the free look can reach, degrees (so you can't spin past the content). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|FreeLook", meta=(ClampMin="0.0", ClampMax="89.0")) float FreeLookMaxYaw = 45.f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|FreeLook", meta=(ClampMin="0.0", ClampMax="89.0")) float FreeLookMaxPitch = 30.f;
+	/** Seconds of no left-stick input before the ease-back begins. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|FreeLook", meta=(ClampMin="0.0")) float FreeLookHold = 2.0f;
+	/** How long the ease back to centre takes, seconds (smootherstep). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|FreeLook", meta=(ClampMin="0.1")) float FreeLookReturn = 1.5f;
+	float LookYaw = 0.f, LookPitch = 0.f;   // current free-look offset (deg)
+	float LookIdle = 0.f;                    // seconds since last left-stick input
+	float LookRetFromYaw = 0.f, LookRetFromPitch = 0.f, LookRetT = -1.f;   // ease-back state
+	TWeakObjectPtr<AActor> DCRA;             // the nDisplay root actor (frustum source) — found lazily
+	FRotator DCRABaseRot = FRotator::ZeroRotator;   // its authored orientation, captured once
+	bool DCRABaseSet = false;
+	TArray<TWeakObjectPtr<USceneComponent>> DCRAViewpoints;   // per-viewport view origins (wall + floor)
+	TArray<FRotator> DCRAViewpointBase;                        // their authored rotations, captured once
+	void ApplyFreeLook(float Yaw, float Pitch);   // rotate the DCRA (cluster) or the camera (PIE)
+	void ApplyNaniteDiag();                       // set r.Nanite.ProxyRenderMode on this node (idempotent, all nodes)
 
 	/** Look-around orbit speed (deg/sec at full stick) + pitch clamp. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage")
@@ -248,6 +454,29 @@ private:
 	// ── Cinematic post-processing: 4 presets, cycle with Up/Down arrows (0 Clean / 1 Cinematic / 2 Scientific / 3 Deep Space) ──
 	int32 PPPreset = 0;
 	UPROPERTY() TObjectPtr<class APostProcessVolume> PPVolume = nullptr;
+	/** Filler growth as a FRACTION of the world's own zoom rate (LocalK ~12). 1.0 = scales exactly like the
+	 *  stations.
+	 *  PERFORMANCE WARNING (learned the hard way — this caused a "massive performance drop at the start"):
+	 *  the fillers are THOUSANDS of ISM instances. Feeding them the world's full exponential blows every
+	 *  instance up until it covers the screen — enormous overdraw, worst at the start where the exponent is
+	 *  furthest from the NirA anchor. The original hard-coded 2.4 against a world K of 12 (= ratio 0.2) was
+	 *  not a bug; it was tuned to keep the cloud cheap. 0.2 restores that. Raise slowly and watch the frame
+	 *  time — this is the knob that will cost you FPS. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.05", ClampMax="2.0"))
+	float FillerScaleRatio = 0.2f;
+
+	/** Clamp on the filler cloud's scale. Keep the max LOW: at 400 the instances inflate until each one fills
+	 *  the frame (that was the startup stall). 12 is the proven value — the medium fades out via FillerFade
+	 *  well before it would need to grow past it. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.01")) float FillerScaleMin = 0.5f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="1.0"))  float FillerScaleMax = 12.f;
+
+	/** Filler colours. The medium runs on M_StationMaster now (M_Filler had NO colour param — its colour was
+	 *  baked into the graph, which is exactly why the palette squeeze never reached the fillers). These are
+	 *  the AUTHORED values the squeeze derives from: proteins on the blue pole, enzymes on the amber one. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers") FLinearColor FillerColorMotes  = FLinearColor(0.30f, 0.52f, 0.90f);
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers") FLinearColor FillerColorStruct = FLinearColor(0.90f, 0.62f, 0.18f);
+
 	// ── Scientific space fillers: cycle with F (0 off / 1 motes / 2 grid / 3 structures) ──
 	int32 FillerMode = 3;   // default: full medium (proteins + enzymes), scale-gated to the molecular band
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> FillerMotes = nullptr;
@@ -260,21 +489,86 @@ private:
 	bool bUpPrev = false, bDownPrev = false, bLeftPrev = false, bRightPrev = false;   // D-Pad rising-edge latches
 	bool bLBPrev = false, bRBPrev = false;                                            // LB/RB style-light latches
 	bool bAPrev  = false, bBPrev  = false;                                            // A/B density latches
-	int32 NiraVersion = 1;   // S2 NirA representation: 0 high-res FBX / 1 low-res FBX (default) / 2 procedural
+	int32 NiraVersion = 1;   // S2 NirA representation: 0 high-res FBX / 1 low-res FBX (default) / 2 procedural / 3 hull
+	/** How many NirA versions X cycles through. Bump to 4 for the tight-hull variant (QZVer3). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage") int32 NiraVersionCount = 4;
 	bool bXPrev = false;     // X button (version cycle) latch
 
 	// STYLE LIGHT — the freed S4 key light, dialled on the LB/RB shoulders for on-site look variation.
 	// Absolute intensity ladder (Michael's spec): 0 off / 2k / 5k / 10k / 25k / 50k(=current, full). LB down, RB up.
-	int32 StyleLightStep = 5;    // default = 50k (matches the current authored intensity)
+	int32 StyleLightStep = 0;    // index into StyleLightLadder; DEFAULT 0 = starts dark (Michael), ease up with RB
+	/** How fast the style light EASES DOWN / holds (FInterpTo speed). Higher = snappier. The fade-OUT Michael likes. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|StyleLight", meta=(ClampMin="0.1", ClampMax="20.0"))
+	float StyleLightEaseSpeed = 1.0f;   // 3x slower than the original 3.0 (Michael: prolong the back-button light)
+	/** How fast the style light EASES UP (fade-IN). Lower than EaseSpeed so the rise isn't front-loaded/snappy on
+	 *  the huge non-linear ladder — Michael: "fade-in is still too quick, should match the fade-out". */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|StyleLight", meta=(ClampMin="0.1", ClampMax="20.0"))
+	float StyleLightRiseSpeed = 0.45f;  // ~2x slower than the fall, so the fade-in duration matches the fade-out
+	float StyleLightEased = 0.f;   // current eased intensity (interpolated toward the ladder target each frame)
+
+	// ── STYLE LIGHT (LB / RB) ────────────────────────────────────────────────────────────────────────────
+	// Lifted OUT of L_QZ_S4_Density into the persistent level (Michael: "at the moment it is limiting").
+	// It was bound to S4's streaming/visibility, had attenuation_radius 7182 (so it could not reach once the
+	// world scaled up at depth) and was STATIONARY (the expensive mobility for something driven every frame).
+	// Now: persistent, MOVABLE, huge reach, and it rides the Anchor so the key light stays on the hero.
+	/** The intensity ladder LB/RB steps through, in candelas. Editable — add steps for more range.
+	 *  Default: off / 2k / 5k / 10k / 25k / 50k (the old authored value) / 120k / 300k. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|StyleLight")
+	TArray<float> StyleLightLadder = { 0.f, 2000.f, 5000.f, 10000.f, 25000.f, 50000.f, 120000.f, 300000.f };
+	/** Where the light sits relative to the Anchor. Rotated by the orbit, so it keeps its angle on the
+	 *  subject as the world turns. (0,0,0) = dead centre inside the hero. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|StyleLight")
+	FVector StyleLightOffset = FVector(-10.f, -10.f, 0.f);
+	/** Attenuation radius. The authored asset had 7182 (too small — the scene outgrew it at depth). I then
+	 *  swung to 200000, which was reckless: a point light's SHADOW work scales with what its radius reaches,
+	 *  and ApplyStations rewrites every station transform each frame, so nothing shadow-related can cache.
+	 *  30000 covers the stage without paying for an enormous shadow volume. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|StyleLight", meta=(ClampMin="100.0"))
+	float StyleLightRadius = 30000.f;
+
+	/** Style light casts shadows. OFF by default: it is a STYLE key that moves with the Anchor every frame
+	 *  in a scene whose geometry also rescales every frame — so its shadows can never cache and cost full
+	 *  regeneration continuously. Key_Directional still casts the scene's real shadows. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|StyleLight")
+	bool bStyleLightShadows = false;
 	TWeakObjectPtr<ULightComponent> StyleLight;   // cached, found by the 'QZStyleLight' actor tag
 
 	// CLEAN MODE — Y hides the whole editorial HUD for clean photography plates (cluster-synced).
 	bool bCleanMode = false;
 	bool bYPrev = false;
 
+	// S3 OXIDATION director — ping-pong the sulfur-switch SVT frame (dwell -> snap -> dwell = the click);
+	// L3 (left-stick click) freezes/resumes for a held hero moment. Cluster-synced via OxTime.
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Oxidation", meta=(ClampMin="0.5"))
+	float OxPeriod = 6.0f;             // seconds per full oxidize<->reduce ping-pong cycle
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Oxidation", meta=(ClampMin="2"))
+	int32 OxFrames = 300;             // SVT frame count (matches the sulfur_switch bake)
+	/** SVT streaming bandwidth cap in MiB/s, applied at BeginPlay on every node. The engine SERVES LOWER MIPS
+	 *  when over this budget (blur pop near the ping-pong's fast sweep at the 512 default). NVMe easily does
+	 *  multiple GiB/s — 4096 gives the two sulfur-switch volumes full-res headroom through the snap. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Oxidation", meta=(ClampMin="512", ClampMax="16384"))
+	int32 SVTBandwidthMiB = 4096;
+	/** During the ping-pong SNAP the SVT is streamed with BLOCKING requests (full mip, same frame — no blur pop).
+	 *  This is the frames/sec threshold above which "snapping" is detected; the dwell (~0 fps) streams async. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Oxidation", meta=(ClampMin="1.0"))
+	float OxBlockFrameVel = 40.f;
+	float OxPrevFrame = 0.f;          // last tick's SVT frame, for the sweep-velocity (snap vs dwell) test
+	TWeakObjectPtr<class UHeterogeneousVolumeComponent> OxVolume;   // cached, found by the 'QZOxSwitch' tag
+	float OxTime = 0.f;               // ping-pong clock (primary advances; secondaries receive it)
+	bool  bOxFrozen = false;          // L3 freeze/resume
+
+	bool  bL3Prev = false;
+
 	// Per-frame light fade: each station sublevel's lights fade with that station's visibility (no pop-in).
 	TMap<ULevel*, float> LevelFade;                                   // rebuilt each frame in ApplyStations
+	TSet<ULevel*> TrackedLevels;                                      // every station sublevel ever seen (persistent)
 	TMap<TWeakObjectPtr<ULightComponent>, float> LightBaseIntensity;  // captured base intensity, persistent
+	TMap<TWeakObjectPtr<AActor>, float> PPBaseWeight;                 // PostProcessVolume base BlendWeight, persistent
+	TMap<TWeakObjectPtr<ULightComponent>, float> LightFadeSmoothed;  // per-light eased fade (prolongs the ramp)
+	TMap<TWeakObjectPtr<AActor>, float> PPFadeSmoothed;              // per-PP eased fade
+	/** Speed the map-light + PP fade EASES toward the station's visibility. Lower = slower/prolonged ramp.
+	 *  Michael wanted this ~3x slower than the instant snap it replaced. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage") float LightFadeSpeed = 1.2f;
 
 	float OrbitYaw = 0.f, OrbitPitch = 0.f, ZoomVel = 0.f;
 	float PrevZoom = 0.f;      // for a cluster-consistent visual velocity (ZoomProgress delta, valid on every node)
@@ -303,8 +597,23 @@ private:
 	void    ApplyStyleLight();        // set the style light's intensity from StyleLightStep
 	class ULightComponent* GetStyleLight();   // find+cache the 'QZStyleLight'-tagged light
 	void    SetCleanMode(bool bOn);   // hide/show the whole editorial HUD (readout + specimen text + rules/bar)
+	class UHeterogeneousVolumeComponent* GetOxVolume();   // find+cache the 'QZOxSwitch'-tagged S3 volume
+	void    UpdateOxidation(float Dt);   // ping-pong the sulfur-switch SVT frame (all nodes)
+	void    UpdateS3Focus();             // NirA hull dissolves -> orbital SVT blooms in, on MET169
+
+	// ── S3 FOCUS (NirA -> orbital reveal) ────────────────────────────────────────────────────────────────
+	/** Width of the focus band as a fraction of the station spacing. Bigger = the reveal eases in earlier. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|S3Focus", meta=(ClampMin="0.2", ClampMax="3.0")) float S3FocusWidth = 1.4f;
+	/** Peak opacity the S3 NirA hull reaches when NOT focused (so it can read strong before dissolving). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|S3Focus", meta=(ClampMin="0.0", ClampMax="1.0")) float S3NirABaseVis = 1.0f;
+	float S3Focus = 0.f;   // 0 = NirA shown, 1 = orbital shown (read-only, for debug)
+	void    UpdateGuides();              // front-facing marker + zoom-centre reticle at the Anchor
+	void    ApplyNiraShells();           // show/hide SM_S2_NirA's enclosing ribbon+VOLUME surfaces
+	void    ApplyPalette();              // squeeze every station colour toward the nearest hue pole
 	float   StationScale(int32 N) const;
 	float   StageCentre(int32 N) const;   // ZoomProgress centre of stage N, incl. the ZoomLeadIn shift
+	float   StationK(int32 N) const;      // per-station ZoomK (StationZoomK[N] or ZoomK) * ZoomIntensity
+	float   LocalK() const;               // K at the CURRENT depth, blended across the leg — for the fillers
 	float   CurrentScaleMeters() const;
 	FString FormatScale(float Metres) const;
 	FString FormatRate(float PerSec) const;   // SI-suffixed rate for the Observer Speed readout
