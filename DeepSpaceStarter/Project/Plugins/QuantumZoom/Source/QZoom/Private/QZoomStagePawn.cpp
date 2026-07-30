@@ -328,6 +328,7 @@ void AQZoomStagePawn::Tick(float Dt)
 	ApplyNiraShells();   // hide SM_S2_NirA's enclosing ribbon/VOLUME so they don't obscure MET169
 	ApplyPalette();      // squeeze the hue spread toward the amber/blue poles (Back/Start, R3 = reset)
 	UpdateCH4Cycle(Dt);  // CH4: FmoB docks + oxidises Met169, reductase strips it back. Loops.
+	UpdateRefParticles();// log-spaced self-similar mote field: the scale reference
 
 	// ── HITCH REPORT ────────────────────────────────────────────────────────────────────────────────────
 	const double TickT1 = FPlatformTime::Seconds();
@@ -589,6 +590,95 @@ float AQZoomStagePawn::LocalK() const
 	return FMath::Lerp(StationK(i), StationK(i + 1), FMath::Clamp(t - (float)i, 0.f, 1.f));
 }
 
+void AQZoomStagePawn::UpdateRefParticles()
+{
+	if (!bRefParticles)
+	{
+		if (RefISM) RefISM->SetVisibility(false);
+		return;
+	}
+
+	UStaticMesh* Sphere = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	if (!Sphere) return;
+
+	const int32 N = FMath::Max(RefParticleCount, 0);
+
+	if (!RefISM)
+	{
+		RefISM = NewObject<UInstancedStaticMeshComponent>(this, TEXT("RefParticles"));
+		RefISM->SetupAttachment(RootComponent);
+		RefISM->RegisterComponent();
+		RefISM->SetStaticMesh(Sphere);
+		RefISM->SetMobility(EComponentMobility::Movable);
+		RefISM->SetCastShadow(false);                    // 700 shadow casters for dust is not a trade
+		RefISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		if (UMaterialInterface* Base = Sphere->GetMaterial(0))
+			RefMID = RefISM->CreateAndSetMaterialInstanceDynamicFromMaterial(0, Base);
+	}
+	if (RefMID)
+	{
+		RefMID->SetVectorParameterValue(TEXT("Color"), RefParticleColor * RefParticleBrightness);
+		RefMID->SetVectorParameterValue(TEXT("BaseColor"), RefParticleColor);
+		RefMID->SetScalarParameterValue(TEXT("Emissive"), RefParticleBrightness);
+	}
+	RefISM->SetVisibility(true);
+
+	// Directions and phase offsets are generated ONCE and reused. Regenerating per frame would make
+	// the field boil instead of stream, and re-randomising every tick is the classic way to turn a
+	// scale cue back into noise.
+	if (RefDirs.Num() != N)
+	{
+		RefDirs.SetNum(N);
+		RefOffsets.SetNum(N);
+		RefSizeJitter.SetNum(N);
+		FRandomStream R(20260730);
+		const float Clear = FMath::Clamp(RefParticleClearAxis, 0.f, 0.9f);
+		for (int32 i = 0; i < N; ++i)
+		{
+			FVector D;
+			int32 Guard = 0;
+			do
+			{
+				D = R.GetUnitVector();
+				++Guard;
+			}
+			// keep a cone clear of the view axis so motes never sit on the hero
+			while (Guard < 32 && FMath::Abs(D.X) > 1.f - Clear);
+			RefDirs[i] = D;
+			RefOffsets[i] = R.GetFraction();
+			RefSizeJitter[i] = 0.55f + R.GetFraction() * 0.9f;
+		}
+		RefISM->ClearInstances();
+		for (int32 i = 0; i < N; ++i) RefISM->AddInstance(FTransform::Identity);
+	}
+	if (RefISM->GetInstanceCount() != N) return;
+
+	const float LogSpan = FMath::Loge(FMath::Max(RefParticleMaxUU / FMath::Max(RefParticleMinUU, 1.f), 1.0001f));
+	const FRotator Orbit(OrbitPitch, OrbitYaw, 0.f);
+
+	for (int32 i = 0; i < N; ++i)
+	{
+		// frac walks 0->1 with the zoom and wraps; radius is LOG-spaced across the shell, which is
+		// what holds apparent density constant in a logarithmic descent.
+		const float Frac = FMath::Frac(RefOffsets[i] + ZoomProgress * RefParticleCycles);
+		const float Radius = RefParticleMinUU * FMath::Exp(Frac * LogSpan);
+
+		// size proportional to radius -> constant ANGULAR size -> the field reads self-similar
+		const float Size = Radius * RefParticleSizeFrac * RefSizeJitter[i];
+
+		// fade in at the far end, out at the near end, so recycling is never visible
+		const float FadeIn  = FMath::Clamp(Frac / 0.12f, 0.f, 1.f);
+		const float FadeOut = FMath::Clamp((1.f - Frac) / 0.16f, 0.f, 1.f);
+		float A = FMath::Min(FadeIn, FadeOut);
+		A = A * A * (3.f - 2.f * A);
+
+		const FVector P = Anchor + Orbit.RotateVector(RefDirs[i] * Radius);
+		FTransform T(FQuat::Identity, P, FVector(FMath::Max(Size * A, 0.01f) / 50.f));
+		RefISM->UpdateInstanceTransform(i, T, true, (i == N - 1), false);
+	}
+}
+
+
 /** Piecewise-linear evaluation of a phase->position path, with wrap-around at 1. */
 static FVector CH4EvalPath(float Phase, const TArray<TPair<float, FVector>>& Keys)
 {
@@ -831,13 +921,48 @@ void AQZoomStagePawn::UpdateLights()
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
 		AActor* A = *It;
-		// only touch lights that live in a STATION sublevel we track (skip the persistent level, sky, etc.)
-		if (!TrackedLevels.Contains(A->GetLevel())) continue;
 		// The style light is pawn-owned (LB/RB drives its absolute intensity ladder). Skip it here or the two
 		// writers fight per-frame and the shoulder buttons go erratic.
 		if (A->Tags.Contains(FName(TEXT("QZStyleLight")))) continue;
-		const float* fp = LevelFade.Find(A->GetLevel());
-		const float Fade = fp ? *fp : 0.f;   // missing entry -> 0, so the light fades OUT instead of freezing
+
+		// TWO ways a light can follow a station, and the TAG is the one to author against.
+		//
+		// Historically the only route was LEVEL MEMBERSHIP: a light fades with whichever station
+		// sublevel it happens to sit in. That works, but it forces every accent light to live in a
+		// streamed sublevel, and a light in an UNLOADED sublevel does not exist — which is exactly
+		// the pop-in this function's comment warns about.
+		//
+		// Since the camera never moves and every station is scaled to the same Anchor, one global
+		// rig genuinely serves all 13 decades; there is no per-scale lighting need. So an accent
+		// light should be able to live in the PERSISTENT level and still fade with its station.
+		// "QZLight<N>" does that, level-independently.
+		int32 TagStation = -1;
+		for (const FName& T : A->Tags)
+		{
+			const FString Ts = T.ToString();
+			if (Ts.StartsWith(TEXT("QZLight")))
+			{
+				TagStation = FCString::Atoi(*Ts.Mid(7));
+				break;
+			}
+		}
+
+		float Fade = 0.f;
+		if (TagStation >= 0)
+		{
+			// Same band test ApplyStations uses, so a tagged light tracks its station exactly.
+			const float Sc = StationScale(TagStation);
+			Fade = (Sc > MinVisScale && Sc < MaxVisScale) ? 1.f : 0.f;
+		}
+		else if (TrackedLevels.Contains(A->GetLevel()))
+		{
+			const float* fp = LevelFade.Find(A->GetLevel());
+			Fade = fp ? *fp : 0.f;   // missing entry -> 0, so the light fades OUT instead of freezing
+		}
+		else
+		{
+			continue;    // neither tagged nor in a tracked station level: a global light, leave it alone
+		}
 		TArray<ULightComponent*> Lights;
 		A->GetComponents<ULightComponent>(Lights);
 		for (ULightComponent* LC : Lights)

@@ -204,6 +204,49 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.0", ClampMax="180.0"))
 	float CH4MsraApproachDeg = 60.f;
 
+	/** REFERENCE PARTICLES — a scale reference, not decoration.
+	 *
+	 *  The descent has legs with nothing in them: S5->S6 is 4.10 decades of genuinely empty atom
+	 *  and 27% of the runtime. With nothing passing the eye, a continuous zoom reads as a freeze
+	 *  or a cut however evenly it is paced.
+	 *
+	 *  Radii are LOG-spaced and advance with ZoomProgress, which is the only distribution that
+	 *  keeps apparent density constant in a logarithmic zoom — linear spacing would bunch up at
+	 *  one end and thin out at the other as you descend. Each mote's size grows in proportion to
+	 *  its radius, so its ANGULAR size stays constant and the field reads as self-similar: matter
+	 *  structured the same way at every scale, which is the actual claim of a powers-of-ten zoom.
+	 *  Motes fade in at the far end and out at the near end, so recycling never pops. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles")
+	bool bRefParticles = true;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="0", ClampMax="4000"))
+	int32 RefParticleCount = 700;
+
+	/** Inner / outer radius of the shell, in uu. Outer should sit beyond the station envelope so
+	 *  motes leave frame rather than vanishing mid-view. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="10.0"))
+	float RefParticleMinUU = 260.f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="100.0"))
+	float RefParticleMaxUU = 14000.f;
+
+	/** How many times the whole field recycles across the full descent. Higher = faster streaming. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="1.0", ClampMax="200.0"))
+	float RefParticleCycles = 42.f;
+
+	/** Mote size as a fraction of its own radius. Constant angular size comes from this being fixed. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="0.0005", ClampMax="0.08"))
+	float RefParticleSizeFrac = 0.006f;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="0.0", ClampMax="20.0"))
+	float RefParticleBrightness = 2.2f;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles")
+	FLinearColor RefParticleColor = FLinearColor(0.62f, 0.78f, 1.0f);
+
+	/** Keep a cone clear of the view axis so motes never sit on top of the hero. 0 = no clearing. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="0.0", ClampMax="0.9"))
+	float RefParticleClearAxis = 0.22f;
+
 	/** Cross-fade width (natural-log scale units) at each edge of the visible band — the pawn pushes a
 	 *  'StationFade' 0..1 onto each station's materials so prev/next dissolve instead of popping.
 	 *  Materials without a StationFade param just hard-hide as before. Bigger = longer dissolve. */
@@ -652,6 +695,13 @@ private:
 	void    SetStationFade(AActor* A, float Fade);   // push StationFade onto an actor's materials
 	void    UpdateCH4Cycle(float Dt);                // looping redox cycle at the NirA station
 	float   CH4Phase = 0.f;                          // 0..1, wraps forever
+
+	void    UpdateRefParticles();                    // self-similar scale-reference field
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> RefISM = nullptr;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic>      RefMID = nullptr;
+	TArray<FVector> RefDirs;                         // unit directions, generated once
+	TArray<float>   RefOffsets;                      // per-mote phase offset, generated once
+	TArray<float>   RefSizeJitter;
 	void    UpdateReadout();
 	void    UpdateInfoLayer();         // fixed per-stage detail text, faded by proximity to a stage centre
 	void    InitStreaks();
