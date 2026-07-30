@@ -774,6 +774,25 @@ private:
 	void    UpdateCH4Cycle(float Dt);                // looping redox cycle at the NirA station
 	float   CH4Phase = 0.f;                          // 0..1, wraps forever
 
+	/** FPS on the scene readout: instantaneous, and the MEDIAN over a window.
+	 *
+	 *  Median rather than mean on purpose — a single 200 ms hitch drags a mean down for the whole
+	 *  window and hides what the show actually runs at, while the median ignores it and reports
+	 *  the typical frame. The hitch is still visible in the CURRENT figure as it happens. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Info")
+	bool bShowFPS = true;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Info", meta=(ClampMin="1.0", ClampMax="120.0"))
+	float FpsWindowSeconds = 20.f;
+
+	void    SampleFPS(float Dt);
+	TArray<float> FpsRing;                           // circular buffer of frame deltas
+	int32   FpsHead = 0;
+	int32   FpsFilled = 0;
+	float   FpsCurrent = 0.f;                        // lightly smoothed, or it is unreadable
+	float   FpsMedian = 0.f;
+	float   FpsMedianTimer = 0.f;                    // resort a few times a second, not every frame
+
 	void    UpdateRefParticles();                    // self-similar scale-reference field
 	void    UpdateCommsStreams(float Dt);            // per-station outward data traffic
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> CommsISM = nullptr;

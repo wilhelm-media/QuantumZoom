@@ -335,6 +335,7 @@ void AQZoomStagePawn::Tick(float Dt)
 	ApplyPalette();      // squeeze the hue spread toward the amber/blue poles (Back/Start, R3 = reset)
 	UpdateCH4Cycle(Dt);  // CH4: FmoB docks + oxidises Met169, reductase strips it back. Loops.
 	UpdateRefParticles();// log-spaced self-similar mote field: the scale reference
+	SampleFPS(Dt);       // feed the readout's current + median frame rate
 	UpdateCommsStreams(Dt); // per-station outward data traffic: everything communicates
 
 	// ── HITCH REPORT ────────────────────────────────────────────────────────────────────────────────────
@@ -596,6 +597,58 @@ float AQZoomStagePawn::LocalK() const
 	const int32 i = FMath::Clamp((int32)t, 0, StationCount - 2);
 	return FMath::Lerp(StationK(i), StationK(i + 1), FMath::Clamp(t - (float)i, 0.f, 1.f));
 }
+
+void AQZoomStagePawn::SampleFPS(float Dt)
+{
+	if (Dt <= 0.f) return;
+
+	// CURRENT is smoothed over ~0.25 s. Raw 1/Dt swings by tens of frames between ticks and is
+	// genuinely unreadable on a wall; this still moves instantly enough to catch a hitch.
+	const float Inst = 1.f / Dt;
+	FpsCurrent = (FpsCurrent <= 0.f) ? Inst : FMath::FInterpTo(FpsCurrent, Inst, Dt, 4.f);
+
+	// Ring sized for the window at a generous frame rate. If the machine runs faster than this
+	// the window simply covers less than FpsWindowSeconds rather than misreporting.
+	const int32 Want = FMath::Clamp(FMath::CeilToInt(FpsWindowSeconds * 240.f), 256, 8192);
+	if (FpsRing.Num() != Want)
+	{
+		FpsRing.SetNumZeroed(Want);
+		FpsHead = 0;
+		FpsFilled = 0;
+	}
+	FpsRing[FpsHead] = Dt;
+	FpsHead = (FpsHead + 1) % FpsRing.Num();
+	FpsFilled = FMath::Min(FpsFilled + 1, FpsRing.Num());
+
+	// Sorting ~1200 samples every frame to draw one number would be its own perf problem, so
+	// recompute a few times a second. The window is walked BACKWARDS accumulating real elapsed
+	// time, which means it is exactly FpsWindowSeconds of history regardless of frame rate —
+	// a fixed sample count would silently be 5 s at 240 fps and 40 s at 30 fps.
+	FpsMedianTimer -= Dt;
+	if (FpsMedianTimer > 0.f) return;
+	FpsMedianTimer = 0.25f;
+
+	TArray<float> Win;
+	Win.Reserve(FpsFilled);
+	float Acc = 0.f;
+	for (int32 i = 0; i < FpsFilled; ++i)
+	{
+		const int32 idx = (FpsHead - 1 - i + FpsRing.Num() * 2) % FpsRing.Num();
+		const float d = FpsRing[idx];
+		if (d <= 0.f) continue;
+		Win.Add(d);
+		Acc += d;
+		if (Acc >= FpsWindowSeconds) break;
+	}
+	if (Win.Num() == 0) return;
+	Win.Sort();
+	// median of frame TIMES, then inverted. 1/x is monotonic, so this equals the median of the
+	// frame RATES — and taking it on the times avoids inverting every sample first.
+	const int32 M = Win.Num() / 2;
+	const float MedDt = (Win.Num() % 2) ? Win[M] : (Win[M - 1] + Win[M]) * 0.5f;
+	FpsMedian = (MedDt > 0.f) ? (1.f / MedDt) : 0.f;
+}
+
 
 void AQZoomStagePawn::UpdateCommsStreams(float Dt)
 {
@@ -1701,6 +1754,12 @@ void AQZoomStagePawn::UpdateReadout()
 	// the feature level (Nanite needs SM6 — if the node is SM5 that is the whole bug), whether r.Nanite is on,
 	// and the live ProxyRenderMode. If PIE looks right and the wall doesn't, this line says why.
 	static const TCHAR* NaniteNames[3] = { TEXT("normal"), TEXT("FORCE fallback"), TEXT("FORCE full") };
+	// FPS: current and the median over FpsWindowSeconds. Median is the honest answer to
+	// "what does the show actually run at" — one hitch cannot drag it, unlike a mean.
+	FString FpsLine;
+	if (bShowFPS)
+		FpsLine = FString::Printf(TEXT("\nFPS        %.0f  |  median %.0f  (%.0fs)"),
+			FpsCurrent, FpsMedian, FpsWindowSeconds);
 	FString NanLine;
 	if (NaniteDiagStep != 0)
 	{
@@ -1714,10 +1773,10 @@ void AQZoomStagePawn::UpdateReadout()
 			NaniteNames[FMath::Clamp(NaniteDiagStep, 0, 2)], FLName, NaniteOn, ProxyMode);
 	}
 	Readout->SetText(FText::FromString(FString::Printf(
-		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s\nFILLERS    %s  [%s]%s%s"),
+		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s\nFILLERS    %s  [%s]%s%s%s"),
 		*FormatScale(ObserverSize), *FormatRate(ObserverSpeed), *FormatZoom(Power), ZoomProgress * 100.f,
 		PPNames[FMath::Clamp(PPPreset, 0, 9)], FillNames[FMath::Clamp(FillerMode, 0, 3)],
-		DensNames[FMath::Clamp(FillerDensity, 0, 4)], *PalLine, *NanLine)));
+		DensNames[FMath::Clamp(FillerDensity, 0, 4)], *PalLine, *NanLine, *FpsLine)));
 
 	// Drive the progress FILL: grows from the fixed left end (ReadoutBarLeft) toward the right.
 	if (ReadoutBarFill)
