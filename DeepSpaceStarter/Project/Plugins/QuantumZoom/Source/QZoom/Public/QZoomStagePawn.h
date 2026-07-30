@@ -157,6 +157,53 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage")
 	bool bLogSpacedStations = true;
 
+	/** CH4 REDOX CYCLE — FmoB docks and oxidises Met169, a reductase strips the oxygen back off.
+	 *  Loops forever while the NirA station is in view, which is also the honest depiction: the
+	 *  switch is REVERSIBLE, so a one-shot event would misrepresent it.
+	 *
+	 *  Driven off ZoomProgress, not a wall clock: the phase only advances while the station is
+	 *  actually in its visibility band, so arriving at NirA starts the reaction and leaving
+	 *  freezes it rather than letting it run unseen.
+	 *
+	 *  DOCK POSITIONS ARE SURFACE CONTACT ON THE Met169 AXIS, and that is a correction, not a
+	 *  guess. The CH4 scene docked FmoB 11.49 nm from NirA's centre, but two non-overlapping
+	 *  bodies of radius 8.6 and 6.0 nm cannot be closer than 14.60 — it overlapped the protein
+	 *  by 3.11 nm. Worse, the two active sites cannot meet at all as modelled: FAD sits 0.8 nm
+	 *  inside FmoB and Met169 2.83 nm inside NirA, so oxygen transfer would need the centres
+	 *  3.93 nm apart against a hard floor of 14.60 — short by 10.67 nm.
+	 *
+	 *  The resolution is in the biology. Met169 sits in a leucine-rich NES on a FLEXIBLE linker
+	 *  (AlphaFold pLDDT 66) that the NiRD domain masks and unmasks; oxidation REQUIRES it
+	 *  presented outward. MICAL, the real precedent for enzymatic methionine oxidation, targets
+	 *  Met44/Met47 in actin's D-loop — surface-exposed residues. So the enzyme meets a presented
+	 *  residue at the surface, and surface contact along the Met169 axis is the defensible pose. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	bool bCH4Cycle = true;
+
+	/** Seconds for one full oxidise-and-recover cycle. 90 matches the Blender pre-vis. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="5.0", ClampMax="600.0"))
+	float CH4CycleSeconds = 90.f;
+
+	/** Which station the reaction belongs to. 3 = NirA: at Met169 (4) you are inside the residue
+	 *  and the whole enzymes are off screen. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0", ClampMax="11"))
+	int32 CH4Station = 3;
+
+	/** Surface contact on the Met169 axis, in the station pivot's local space (uu). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	FVector CH4FmobDock = FVector(1435.f, -2537.f, -385.f);
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	FVector CH4MsraDock = FVector(1288.f, -2277.f, -345.f);
+
+	/** How far out along the axis they wait between turns. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="500.0"))
+	float CH4ApproachUU = 9000.f;
+
+	/** Swing the reductase's approach off the oxidase's line so the two arrivals read as separate
+	 *  events. Both still dock on the same site, which is correct — they act on the same residue. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.0", ClampMax="180.0"))
+	float CH4MsraApproachDeg = 60.f;
+
 	/** Cross-fade width (natural-log scale units) at each edge of the visible band — the pawn pushes a
 	 *  'StationFade' 0..1 onto each station's materials so prev/next dissolve instead of popping.
 	 *  Materials without a StationFade param just hard-hide as before. Bigger = longer dissolve. */
@@ -603,6 +650,8 @@ private:
 	void    OnClusterEvent(const FDisplayClusterClusterEventJson& E);
 	void    ApplyStations();          // scale/hide/orbit the tagged station heroes (every node)
 	void    SetStationFade(AActor* A, float Fade);   // push StationFade onto an actor's materials
+	void    UpdateCH4Cycle(float Dt);                // looping redox cycle at the NirA station
+	float   CH4Phase = 0.f;                          // 0..1, wraps forever
 	void    UpdateReadout();
 	void    UpdateInfoLayer();         // fixed per-stage detail text, faded by proximity to a stage centre
 	void    InitStreaks();

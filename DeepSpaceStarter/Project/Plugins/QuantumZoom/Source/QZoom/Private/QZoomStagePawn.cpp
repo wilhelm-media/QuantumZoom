@@ -327,6 +327,7 @@ void AQZoomStagePawn::Tick(float Dt)
 	UpdateGuides();      // authoring aid: fixed front-facing marker + zoom-centre reticle at the Anchor
 	ApplyNiraShells();   // hide SM_S2_NirA's enclosing ribbon/VOLUME so they don't obscure MET169
 	ApplyPalette();      // squeeze the hue spread toward the amber/blue poles (Back/Start, R3 = reset)
+	UpdateCH4Cycle(Dt);  // CH4: FmoB docks + oxidises Met169, reductase strips it back. Loops.
 
 	// ── HITCH REPORT ────────────────────────────────────────────────────────────────────────────────────
 	const double TickT1 = FPlatformTime::Seconds();
@@ -587,6 +588,103 @@ float AQZoomStagePawn::LocalK() const
 	const int32 i = FMath::Clamp((int32)t, 0, StationCount - 2);
 	return FMath::Lerp(StationK(i), StationK(i + 1), FMath::Clamp(t - (float)i, 0.f, 1.f));
 }
+
+/** Piecewise-linear evaluation of a phase->position path, with wrap-around at 1. */
+static FVector CH4EvalPath(float Phase, const TArray<TPair<float, FVector>>& Keys)
+{
+	if (Keys.Num() == 0) return FVector::ZeroVector;
+	if (Phase <= Keys[0].Key) return Keys[0].Value;
+	for (int32 i = 1; i < Keys.Num(); ++i)
+	{
+		if (Phase <= Keys[i].Key)
+		{
+			const float Span = FMath::Max(Keys[i].Key - Keys[i - 1].Key, KINDA_SMALL_NUMBER);
+			float t = (Phase - Keys[i - 1].Key) / Span;
+			t = t * t * (3.f - 2.f * t);                     // smoothstep: no hard corners
+			return FMath::Lerp(Keys[i - 1].Value, Keys[i].Value, t);
+		}
+	}
+	return Keys.Last().Value;
+}
+
+
+void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
+{
+	if (!bCH4Cycle) return;
+	UWorld* W = GetWorld();
+	if (!W) return;
+
+	// Advance ONLY while the reaction's station is actually on screen. That is what makes it
+	// zoom-driven rather than clock-driven: walk away and the reaction holds where it was.
+	const float S = StationScale(CH4Station);
+	const bool bStationUp = (S > MinVisScale && S < MaxVisScale);
+	if (bStationUp)
+	{
+		CH4Phase = FMath::Fmod(CH4Phase + Dt / FMath::Max(CH4CycleSeconds, 0.01f), 1.f);
+	}
+
+	// Approach lines. The oxidase comes straight down the Met169 axis; the reductase arrives on a
+	// different azimuth about that axis so the two arrivals do not read as one object returning.
+	const FVector FmobDir = CH4FmobDock.GetSafeNormal();
+	const FVector MsraDir = CH4MsraDock.GetSafeNormal();
+	const FVector FmobFar = FmobDir * CH4ApproachUU;
+	const FVector MsraFar =
+		FQuat(FmobDir, FMath::DegreesToRadians(CH4MsraApproachDeg)).RotateVector(MsraDir)
+		* CH4ApproachUU;
+
+	// Phases are the CH4 beats divided by the 90 s cycle, so the pre-vis timing carries over.
+	//   oxidant_in 26 -> .289   dock 36 -> .400   dark 56 -> .622
+	//   deactivated 66 -> .733  rescue_in 72 -> .800   donate 80 -> .889   recovered 88 -> .978
+	TArray<TPair<float, FVector>> FmobKeys;
+	FmobKeys.Add({0.000f, FmobFar});
+	FmobKeys.Add({0.200f, FmobFar});
+	FmobKeys.Add({0.289f, FMath::Lerp(FmobFar, CH4FmobDock, 0.55f)});
+	FmobKeys.Add({0.400f, CH4FmobDock});
+	FmobKeys.Add({0.733f, CH4FmobDock});
+	FmobKeys.Add({0.800f, FMath::Lerp(FmobFar, CH4FmobDock, 0.45f)});
+	FmobKeys.Add({1.000f, FmobFar});
+
+	TArray<TPair<float, FVector>> MsraKeys;
+	MsraKeys.Add({0.000f, MsraFar});
+	MsraKeys.Add({0.622f, MsraFar});
+	MsraKeys.Add({0.800f, FMath::Lerp(MsraFar, CH4MsraDock, 0.55f)});
+	MsraKeys.Add({0.889f, CH4MsraDock});
+	MsraKeys.Add({0.978f, CH4MsraDock});
+	MsraKeys.Add({1.000f, FMath::Lerp(MsraFar, CH4MsraDock, 0.35f)});
+
+	// Presence windows, so each enzyme fades in on approach and out on departure instead of
+	// popping. Multiplied by the station's own fade, which is what already reads well.
+	auto Presence = [](float P, float In, float Out)
+	{
+		const float Ramp = 0.06f;                            // fraction of the cycle
+		if (P < In - Ramp || P > Out + Ramp) return 0.f;
+		const float A = FMath::Clamp((P - (In - Ramp)) / Ramp, 0.f, 1.f);
+		const float B = FMath::Clamp(((Out + Ramp) - P) / Ramp, 0.f, 1.f);
+		float F = FMath::Min(A, B);
+		return F * F * (3.f - 2.f * F);
+	};
+
+	const float StationFadeNow = bStationUp ? 1.f : 0.f;
+
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		AActor* A = *It;
+		const bool bFmob = A->Tags.Contains(FName(TEXT("QZCH4Fmob")));
+		const bool bMsra = A->Tags.Contains(FName(TEXT("QZCH4Msra")));
+		if (!bFmob && !bMsra) continue;
+
+		const FVector Local = bFmob ? CH4EvalPath(CH4Phase, FmobKeys)
+		                            : CH4EvalPath(CH4Phase, MsraKeys);
+		const float Vis = StationFadeNow * (bFmob ? Presence(CH4Phase, 0.20f, 0.80f)
+		                                          : Presence(CH4Phase, 0.622f, 1.00f));
+
+		// Relative to the station pivot, so the pawn's exp() scale carries them automatically.
+		A->SetActorRelativeLocation(Local);
+		A->SetActorHiddenInGame(Vis <= 0.002f);
+		if (Vis > 0.002f) SetStationFade(A, Vis);
+	}
+}
+
 
 void AQZoomStagePawn::ApplyStations()
 {
