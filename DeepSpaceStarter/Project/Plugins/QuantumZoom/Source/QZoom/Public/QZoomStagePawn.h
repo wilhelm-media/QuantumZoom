@@ -36,6 +36,64 @@ struct FQZHandover
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="1.0")) float Dissolve = 35.f;
 };
 
+/**
+ * FQZComms — one station's share of the COMMUNICATION layer.
+ *
+ * The through-line is that everything on the ladder is talking: a mycelium signalling across a
+ * colony, a spore broadcasting, a protein passing electrons, a nucleus exchanging gluons. Same
+ * gesture at every scale — packets running OUTWARD along lanes, like traffic on routes rather
+ * than a uniform cloud, so it reads as directed communication and not as dust.
+ *
+ * Purely aesthetic. Nothing here claims to model a real signalling pathway, and the numbers are
+ * chosen for how each stage should FEEL, not measured from anything.
+ *
+ * Stations differ by RHYTHM and DENSITY, never by being a different idea — that is what keeps
+ * thirteen decades feeling like one continuous piece rather than seven unrelated effects.
+ */
+USTRUCT(BlueprintType)
+struct FQZComms
+{
+	GENERATED_BODY()
+
+	/** Discrete routes out of the centre. Few = sparse, legible traffic; many = a busy network. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0", ClampMax="64"))
+	int32 Lanes = 14;
+
+	/** Packets in flight per lane. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0", ClampMax="80"))
+	int32 PerLane = 22;
+
+	/** Trips per second along a lane. Higher = more urgent traffic. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.005", ClampMax="4.0"))
+	float Speed = 0.16f;
+
+	/** Packet length in uu; they are drawn as dashes aligned to travel, not as dots. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="1.0"))
+	float LengthUU = 90.f;
+
+	/** Dash thickness as a fraction of its length. Low = a fast streak, high = a chunky packet. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.02", ClampMax="1.0"))
+	float Thickness = 0.14f;
+
+	/** How far a lane wanders off straight. 0 = radial spokes, high = a loose organic spray. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float Wander = 0.18f;
+
+	/** Helical twist along the run, so traffic curves instead of firing straight out. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="3.0"))
+	float Twist = 0.4f;
+
+	/** 0 = continuous flow. Above 0, packets leave in BURSTS — the higher the gappier. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="0.95"))
+	float Burst = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms")
+	FLinearColor Color = FLinearColor(0.55f, 0.85f, 1.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="30.0"))
+	float Brightness = 4.0f;
+};
+
 class UCameraComponent;
 class USceneComponent;
 class UTextRenderComponent;
@@ -246,6 +304,26 @@ public:
 	/** Keep a cone clear of the view axis so motes never sit on top of the hero. 0 = no clearing. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Reference Particles", meta=(ClampMin="0.0", ClampMax="0.9"))
 	float RefParticleClearAxis = 0.22f;
+
+	/** COMMUNICATION LAYER — one entry per station, index-aligned.
+	 *
+	 *  Everything on this ladder is talking to something, so every stage carries the same gesture:
+	 *  packets running outward along lanes. What changes between stations is rhythm and density,
+	 *  not the idea — which is what makes thirteen decades read as one piece.
+	 *
+	 *  Defaults are filled in the constructor. Aesthetic only; nothing here models a real pathway. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Comms")
+	bool bCommsStreams = true;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Comms")
+	TArray<FQZComms> Comms;
+
+	/** Inner and outer radius of the traffic, as a fraction of the station's own visible size, so
+	 *  the streams stay tied to the object at every scale instead of drifting off it. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Comms", meta=(ClampMin="0.05", ClampMax="3.0"))
+	float CommsInnerFrac = 0.42f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Comms", meta=(ClampMin="0.2", ClampMax="8.0"))
+	float CommsOuterFrac = 2.6f;
 
 	/** Cross-fade width (natural-log scale units) at each edge of the visible band — the pawn pushes a
 	 *  'StationFade' 0..1 onto each station's materials so prev/next dissolve instead of popping.
@@ -697,6 +775,12 @@ private:
 	float   CH4Phase = 0.f;                          // 0..1, wraps forever
 
 	void    UpdateRefParticles();                    // self-similar scale-reference field
+	void    UpdateCommsStreams(float Dt);            // per-station outward data traffic
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> CommsISM = nullptr;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic>      CommsMID = nullptr;
+	TArray<FVector> CommsDirs;                       // lane directions, generated once
+	TArray<float>   CommsOffsets;
+	float           CommsClock = 0.f;
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> RefISM = nullptr;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic>      RefMID = nullptr;
 	TArray<FVector> RefDirs;                         // unit directions, generated once

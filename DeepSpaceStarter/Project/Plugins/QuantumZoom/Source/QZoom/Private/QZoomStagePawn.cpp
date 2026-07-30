@@ -33,6 +33,12 @@
 const FString AQZoomStagePawn::EventName = TEXT("QZoomStage.State");
 static const FName TAG_STATION(TEXT("QZStation"));
 
+// The nominal span every hero is normalised to: 2 x E_TARGET 1732, the size Petri, Nidulans,
+// NirA and MET169 all sit at. It is the one number that turns a station's exp() scale back
+// into a real on-screen size, which the comms traffic needs so it stays tied to the object
+// instead of drifting off it as the ladder descends.
+static constexpr float STATION_SPAN_UU = 3464.f;
+
 AQZoomStagePawn::AQZoomStagePawn()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -329,6 +335,7 @@ void AQZoomStagePawn::Tick(float Dt)
 	ApplyPalette();      // squeeze the hue spread toward the amber/blue poles (Back/Start, R3 = reset)
 	UpdateCH4Cycle(Dt);  // CH4: FmoB docks + oxidises Met169, reductase strips it back. Loops.
 	UpdateRefParticles();// log-spaced self-similar mote field: the scale reference
+	UpdateCommsStreams(Dt); // per-station outward data traffic: everything communicates
 
 	// ── HITCH REPORT ────────────────────────────────────────────────────────────────────────────────────
 	const double TickT1 = FPlatformTime::Seconds();
@@ -589,6 +596,178 @@ float AQZoomStagePawn::LocalK() const
 	const int32 i = FMath::Clamp((int32)t, 0, StationCount - 2);
 	return FMath::Lerp(StationK(i), StationK(i + 1), FMath::Clamp(t - (float)i, 0.f, 1.f));
 }
+
+void AQZoomStagePawn::UpdateCommsStreams(float Dt)
+{
+	if (!bCommsStreams)
+	{
+		if (CommsISM) CommsISM->SetVisibility(false);
+		return;
+	}
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (!Cube) return;
+
+	// One entry per station, authored for FEEL. Same gesture everywhere — packets outward along
+	// lanes — differing only in rhythm and density, which is what keeps the ladder coherent.
+	if (Comms.Num() < StationCount)
+	{
+		Comms.SetNum(StationCount);
+		auto Set = [this](int32 i, int32 lanes, int32 per, float spd, float len, float thick,
+		                  float wander, float twist, float burst, FLinearColor c, float bright)
+		{
+			if (!Comms.IsValidIndex(i)) return;
+			FQZComms& E = Comms[i];
+			E.Lanes = lanes; E.PerLane = per; E.Speed = spd; E.LengthUU = len;
+			E.Thickness = thick; E.Wander = wander; E.Twist = twist; E.Burst = burst;
+			E.Color = c; E.Brightness = bright;
+		};
+		//     idx lanes per  speed  len  thick wander twist burst  colour                       bright
+		// S0 forest: few, slow, wide and wandering — spores and scent on the air, barely directed
+		Set(0,  9, 14, 0.055f, 150.f, 0.30f, 0.55f, 0.15f, 0.00f, FLinearColor(0.95f,0.78f,0.42f), 2.6f);
+		// S1 mycelium: THE network. Many tight lanes, steady heavy traffic — the literal case
+		Set(1, 26, 30, 0.130f, 120.f, 0.10f, 0.10f, 0.55f, 0.00f, FLinearColor(0.62f,0.92f,0.70f), 4.2f);
+		// S2 conidium: a spore broadcasting. Few lanes, hard bursts, long gaps between calls
+		Set(2, 12, 16, 0.190f, 105.f, 0.20f, 0.28f, 0.30f, 0.62f, FLinearColor(1.00f,0.72f,0.38f), 4.6f);
+		// S3 NirA: protein signalling. Purposeful, fast, tightly channelled
+		Set(3, 18, 24, 0.260f,  80.f, 0.12f, 0.12f, 0.70f, 0.00f, FLinearColor(0.55f,0.80f,1.00f), 4.4f);
+		// S4 Met169: the switch. Sparse deliberate pulses — one packet at a time, and it matters
+		Set(4,  7, 10, 0.330f,  70.f, 0.26f, 0.06f, 0.20f, 0.55f, FLinearColor(1.00f,0.66f,0.20f), 6.0f);
+		// S5 density: probability, not messages. Many faint short flickers, almost a shimmer
+		Set(5, 34, 34, 0.150f,  40.f, 0.40f, 0.70f, 0.90f, 0.00f, FLinearColor(0.80f,0.72f,1.00f), 3.0f);
+		// S6 nucleus: the fastest exchange there is. Very short, very quick, very bright
+		Set(6, 22, 40, 0.720f,  34.f, 0.16f, 0.20f, 1.40f, 0.00f, FLinearColor(0.70f,0.90f,1.00f), 7.0f);
+	}
+
+	// Which station is actually on screen, and how strongly. Traffic belongs to the thing you are
+	// looking at, so it hands over exactly as the stations do.
+	int32 Best = -1;
+	float BestFade = 0.f, BestScale = 1.f;
+	for (int32 N = 0; N < StationCount; ++N)
+	{
+		const float S = StationScale(N);
+		const float lnMin = FMath::Loge(FMath::Max(MinVisScale, 1e-30f));
+		const float lnMax = FMath::Loge(FMath::Max(MaxVisScale, MinVisScale * 2.f));
+		const float LogS = FMath::Loge(FMath::Max(S, 1e-30f));
+		const float Up = FMath::Clamp((LogS - lnMin) / FMath::Max(StationFadeWidth, 1e-3f), 0.f, 1.f);
+		const float Dn = FMath::Clamp((lnMax - LogS) / FMath::Max(StationFadeWidth, 1e-3f), 0.f, 1.f);
+		float F = Up * Dn;
+		F = F * F * (3.f - 2.f * F);
+		if (F > BestFade) { BestFade = F; Best = N; BestScale = S; }
+	}
+	if (Best < 0 || !Comms.IsValidIndex(Best) || BestFade <= 0.002f)
+	{
+		if (CommsISM) CommsISM->SetVisibility(false);
+		return;
+	}
+	const FQZComms& C = Comms[Best];
+	const int32 Total = FMath::Max(C.Lanes, 0) * FMath::Max(C.PerLane, 0);
+	if (Total <= 0)
+	{
+		if (CommsISM) CommsISM->SetVisibility(false);
+		return;
+	}
+
+	if (!CommsISM)
+	{
+		CommsISM = NewObject<UInstancedStaticMeshComponent>(this, TEXT("CommsStreams"));
+		CommsISM->SetupAttachment(RootComponent);
+		CommsISM->RegisterComponent();
+		CommsISM->SetStaticMesh(Cube);
+		CommsISM->SetMobility(EComponentMobility::Movable);
+		CommsISM->SetCastShadow(false);
+		CommsISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		if (UMaterialInterface* Base = Cube->GetMaterial(0))
+			CommsMID = CommsISM->CreateAndSetMaterialInstanceDynamicFromMaterial(0, Base);
+	}
+	CommsISM->SetVisibility(true);
+	if (CommsMID)
+	{
+		const FLinearColor Lit = C.Color * C.Brightness * BestFade;
+		CommsMID->SetVectorParameterValue(TEXT("Color"), Lit);
+		CommsMID->SetVectorParameterValue(TEXT("BaseColor"), C.Color);
+		CommsMID->SetScalarParameterValue(TEXT("Emissive"), C.Brightness * BestFade);
+	}
+
+	// Lane directions are generated ONCE from a fixed seed. Re-rolling them per frame would make
+	// the routes flicker rather than persist, and a route that does not persist is not a route.
+	const int32 MaxLanes = 64;
+	if (CommsDirs.Num() != MaxLanes)
+	{
+		CommsDirs.SetNum(MaxLanes);
+		CommsOffsets.SetNum(MaxLanes);
+		FRandomStream R(90210);
+		for (int32 i = 0; i < MaxLanes; ++i)
+		{
+			CommsDirs[i] = R.GetUnitVector();
+			CommsOffsets[i] = R.GetFraction();
+		}
+	}
+	if (CommsISM->GetInstanceCount() != Total)
+	{
+		CommsISM->ClearInstances();
+		for (int32 i = 0; i < Total; ++i) CommsISM->AddInstance(FTransform::Identity);
+	}
+
+	CommsClock += Dt;
+
+	// Traffic is sized to the STATION, not to the world, so it stays on the object at every scale.
+	const float Span = STATION_SPAN_UU * BestScale;
+	const float Rin = Span * CommsInnerFrac;
+	const float Rout = Span * CommsOuterFrac;
+	const FRotator Orbit(OrbitPitch, OrbitYaw, 0.f);
+
+	int32 idx = 0;
+	for (int32 l = 0; l < C.Lanes && idx < Total; ++l)
+	{
+		const FVector Dir = CommsDirs[l % MaxLanes];
+		// a stable perpendicular, for wander and twist
+		FVector Side = FVector::CrossProduct(Dir, FVector::UpVector);
+		if (Side.SizeSquared() < 1e-4f) Side = FVector::CrossProduct(Dir, FVector::ForwardVector);
+		Side.Normalize();
+		const FVector Up2 = FVector::CrossProduct(Dir, Side).GetSafeNormal();
+
+		for (int32 p = 0; p < C.PerLane && idx < Total; ++p, ++idx)
+		{
+			float f = FMath::Frac(CommsOffsets[l % MaxLanes]
+			                      + (float)p / FMath::Max(C.PerLane, 1)
+			                      + CommsClock * C.Speed);
+
+			// BURST: squeeze the whole lane's traffic into the first part of the cycle, so packets
+			// leave in clumps with silence between — a station that CALLS rather than streams.
+			float Gate = 1.f;
+			if (C.Burst > 0.f)
+			{
+				const float Win = 1.f - C.Burst;
+				if (f > Win) { Gate = 0.f; }
+				else         { f = f / FMath::Max(Win, 1e-3f); }
+			}
+
+			const float Rad = FMath::Lerp(Rin, Rout, f);
+			const float Ang = f * C.Twist * PI * 2.f;
+			const float Wob = C.Wander * Span * 0.12f;
+			const FVector Local =
+				Dir * Rad
+				+ Side * (FMath::Sin(Ang + l) * Wob + FMath::Sin(f * 9.f + l) * Wob * 0.4f)
+				+ Up2 * (FMath::Cos(Ang + l) * Wob);
+
+			// fade in as it leaves, out as it arrives — no packets appearing or vanishing mid-air
+			const float A = FMath::Min(FMath::Clamp(f / 0.14f, 0.f, 1.f),
+			                           FMath::Clamp((1.f - f) / 0.22f, 0.f, 1.f)) * Gate;
+			const float Len = C.LengthUU * BestScale * FMath::Max(A, 0.f);
+			const float Thk = Len * C.Thickness;
+
+			// aligned to travel, so each packet reads as a dash with direction, not a dot
+			const FVector Fwd = (Local.GetSafeNormal() + Dir).GetSafeNormal();
+			const FQuat Rot = FRotationMatrix::MakeFromX(Fwd).ToQuat();
+			const FTransform T(Orbit.Quaternion() * Rot,
+			                   Anchor + Orbit.RotateVector(Local),
+			                   FVector(FMath::Max(Len, 0.01f), FMath::Max(Thk, 0.01f),
+			                           FMath::Max(Thk, 0.01f)) / 100.f);  // BasicShapes/Cube is 100uu
+			CommsISM->UpdateInstanceTransform(idx, T, true, (idx == Total - 1), false);
+		}
+	}
+}
+
 
 void AQZoomStagePawn::UpdateRefParticles()
 {
