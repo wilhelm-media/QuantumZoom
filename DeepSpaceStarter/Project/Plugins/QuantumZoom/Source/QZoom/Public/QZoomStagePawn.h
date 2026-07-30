@@ -18,22 +18,22 @@ struct FQZHandover
 	GENERATED_BODY()
 
 	/** Use this per-station override. Off = the station uses the global StationZoomK / MinVis / fade values. */
-	UPROPERTY(EditAnywhere, Category="Handover") bool bEnabled = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover") bool bEnabled = false;
 
 	/** TIMING — how steep this station's growth is. Higher = it stays a tiny dot longer, then blooms fast
 	 *  (later, snappier handover). This is the per-station ZoomK. */
-	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="1.0", ClampMax="80.0")) float Timing = 12.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="1.0", ClampMax="80.0")) float Timing = 12.f;
 
 	/** INITIAL RESIZE — how small the station first appears (its 'dot' size when it blooms in). Smaller =
 	 *  it starts tinier and further away. This is the per-station MinVisScale. */
-	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="0.001", ClampMax="1.0")) float InitialSize = 0.03f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="0.001", ClampMax="1.0")) float InitialSize = 0.03f;
 
 	/** FADE IN — width of the appear ramp (log-scale). Bigger = a longer, softer dissolve-IN. */
-	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="0.1", ClampMax="6.0")) float FadeIn = 2.2f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="0.1", ClampMax="6.0")) float FadeIn = 2.2f;
 
 	/** DISSOLVE (out) — the scale at which the station fades OUT as the next one takes over. Bigger = it
 	 *  lingers longer before dissolving. This is the per-station MaxVis (like the QZMaxVis tag). */
-	UPROPERTY(EditAnywhere, Category="Handover", meta=(ClampMin="1.0")) float Dissolve = 35.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="1.0")) float Dissolve = 35.f;
 };
 
 class UCameraComponent;
