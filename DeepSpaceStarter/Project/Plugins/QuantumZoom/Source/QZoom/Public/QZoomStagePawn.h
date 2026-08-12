@@ -34,6 +34,11 @@ struct FQZHandover
 	/** DISSOLVE (out) — the scale at which the station fades OUT as the next one takes over. Bigger = it
 	 *  lingers longer before dissolving. This is the per-station MaxVis (like the QZMaxVis tag). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="1.0")) float Dissolve = 35.f;
+
+	/** FADE OUT — width of the DISSOLVE ramp, separate from FadeIn. These used to be one number, which is
+	 *  why lengthening the lab's dissolve also made it bloom in slowly: appearing and departing want very
+	 *  different durations. You arrive at a scene quickly and leave it slowly. 0 = follow FadeIn. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="0.0", ClampMax="6.0")) float FadeOut = 0.f;
 };
 
 /**
@@ -75,13 +80,33 @@ struct FQZComms
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.02", ClampMax="1.0"))
 	float Thickness = 0.14f;
 
-	/** How far a lane wanders off straight. 0 = radial spokes, high = a loose organic spray. */
+	/** How hard the trail MEANDERS while it searches. This is the ant-path dial: 0 is a straight
+	 *  spoke (mechanical, wrong), high is a path that casts about before committing outward. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="1.0"))
-	float Wander = 0.18f;
+	float Wander = 0.42f;
 
-	/** Helical twist along the run, so traffic curves instead of firing straight out. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="3.0"))
-	float Twist = 0.4f;
+	/** How strongly the trail is pulled back on course after wandering. Low = it keeps drifting and
+	 *  never arrives; high = it corrects hard and looks purposeful. The tension between this and
+	 *  Wander is what reads as SEARCHING rather than either drifting or marching. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float Commit = 0.30f;
+
+	/** Fraction of trails that BRANCH off another trail instead of leaving the centre. Branching is
+	 *  most of what makes a foraging network look explored rather than radiated. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="0.9"))
+	float Branch = 0.45f;
+
+	/** Blink rate in Hz. Packets wink on and off as they travel — the "signal" read. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="30.0"))
+	float BlinkHz = 3.2f;
+
+	/** How deep the blink cuts. 0 = steady, 1 = fully off between pulses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float BlinkDepth = 0.75f;
+
+	/** Packets grow brighter and longer as they get further out, so the trail reads directional. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="4.0"))
+	float OutwardGain = 1.4f;
 
 	/** 0 = continuous flow. Above 0, packets leave in BURSTS — the higher the gappier. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Comms", meta=(ClampMin="0.0", ClampMax="0.95"))
@@ -138,7 +163,7 @@ public:
 	FVector Anchor = FVector(1500.f, 0.f, 120.f);
 
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="2", ClampMax="12"))
-	int32 StationCount = 7;
+	int32 StationCount = 9;
 
 	/** 0..1 across all stations. Trigger-driven on the primary node, cluster-synced. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="1.0"))
@@ -197,7 +222,11 @@ public:
 	/** Lead-in before the first station: at ZoomProgress 0 you start OUTSIDE S0's dissolve-in (S0 blooms in
 	 *  as you begin zooming). Shifts every stage centre into [ZoomLeadIn, 1]. 0 = start right on S0 as before. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="0.4"))
-	float ZoomLeadIn = 0.15f;
+	// 0.15 meant the first 15% of the bar was spent approaching stage 0 rather than travelling
+	// through it — dead runway the operator skipped every time. 0 puts stage 0's centre at the
+	// very start, so the mushroom is already at working size on frame one and the whole bar is
+	// useful. Everything below redistributes across 0..1 automatically.
+	float ZoomLeadIn = 0.f;
 
 	/** Space the stations by their PHYSICAL SCALE instead of by their index.
 	 *
@@ -241,6 +270,30 @@ public:
 	/** Seconds for one full oxidise-and-recover cycle. 90 matches the Blender pre-vis. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="5.0", ClampMax="600.0"))
 	float CH4CycleSeconds = 90.f;
+
+	/** "Let's watch that whole process again, faster this time" (Markos, 4.6). Rather than a cue the
+	 *  operator has to hit, the cycle ACCELERATES THE LONGER YOU STAY: the first pass runs at full length
+	 *  so it can be read, and repeats compress toward this multiple. Dwell is the trigger, so 4.6 happens
+	 *  by itself if the operator holds on the switch, and never happens if they move on. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="1.0", ClampMax="10.0"))
+	float CH4SpeedMax = 3.0f;
+
+	/** How many completed cycles it takes to reach CH4SpeedMax. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.25", ClampMax="8.0"))
+	float CH4SpeedRampCycles = 1.5f;
+
+	/** Hand the docking MOTION to a Level Sequence so it can be adjusted in Sequencer instead of
+	 *  in C++ keyframes. The pawn stops writing the transform and instead SCRUBS the sequence to
+	 *  CH4Phase — so the animation is still driven by zoom depth and still freezes when you leave
+	 *  the station, it is just authored on a timeline. Presence and fade stay in code, because
+	 *  they drive a material parameter rather than a transform. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	bool bCH4UseSequencer = false;
+
+	/** Length of that sequence in seconds. CH4Phase 0..1 maps onto 0..this. Must match the
+	 *  sequence's own duration or the docking lands at the wrong moment. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.1"))
+	float CH4SequenceSeconds = 10.f;
 
 	/** Which station the reaction belongs to. 3 = NirA: at Met169 (4) you are inside the residue
 	 *  and the whole enzymes are off screen. */
@@ -312,8 +365,11 @@ public:
 	 *  not the idea — which is what makes thirteen decades read as one piece.
 	 *
 	 *  Defaults are filled in the constructor. Aesthetic only; nothing here models a real pathway. */
+	/** OFF. Two attempts at the communication layer — radial lanes, then foraging trails — both read as
+	 *  noise laid over the zoom rather than a hidden layer inside it (Michael: "this is getting worse").
+	 *  The code stays so the idea can be picked up again from a different angle; it does not run. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Comms")
-	bool bCommsStreams = true;
+	bool bCommsStreams = false;
 
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Comms")
 	TArray<FQZComms> Comms;
@@ -330,6 +386,11 @@ public:
 	 *  Materials without a StationFade param just hard-hide as before. Bigger = longer dissolve. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.1", ClampMax="6.0"))
 	float StationFadeWidth = 2.2f;
+
+	/** Same, but for the DISSOLVE edge. Split from StationFadeWidth because one number cannot serve both:
+	 *  a station should bloom in fast and dissolve out slowly. 0 = fall back to StationFadeWidth. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="6.0"))
+	float StationFadeOutWidth = 0.f;
 
 	/** Shader warm-up: for this many frames at start, EVERY station is rendered once — dissolved to nothing at
 	 *  a subpixel scale — so its material shaders/PSOs compile up front instead of flashing the default grey
@@ -495,7 +556,16 @@ public:
 	// S0->Cell was 4.48 decades, the longest on the ladder and flagged in the code as a
 	// problem; it is now 2.48 + 2.00. Note these are CLASS DEFAULTS: a pawn already
 	// placed in a level carries its own serialised copy and ignores them.
-	TArray<float> ScaleMeters = {0.09f, 3e-4f, 3e-6f, 1e-8f, 2e-10f, 1e-10f, 8e-15f};
+	// Nine stations since chapter 5 became one continuous flight rather than a single stop.
+	// The last three come from zoom_detail's own ruler, in femtometres:
+	//   S6  8.42e-15  the S-32 nucleus       (this slot used to be labelled "quarks" at 8e-15,
+	//                                         which was always nucleus scale, not quark scale)
+	//   S7  1.68e-15  one nucleon
+	//   S8  3.0e-16   the quark / flux-tube region
+	// S5 -> S6 is 4.4 decades with nothing in it. That gap is the script's "vast, open space"
+	// and it is carried by a mote field, not by an asset.
+	TArray<float> ScaleMeters = {0.09f, 3e-4f, 3e-6f, 1e-8f, 2e-10f, 1e-10f,
+	                             8.42e-15f, 1.68e-15f, 3.0e-16f};
 	/** Camera-relative (forward, right, up). Negative right = LEFT; positive up keeps it high on the
 	 *  WALL and out of the floor frustum. Default = top-left of the wall. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
@@ -651,13 +721,26 @@ private:
 	 *  not a bug; it was tuned to keep the cloud cheap. 0.2 restores that. Raise slowly and watch the frame
 	 *  time — this is the knob that will cost you FPS. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.05", ClampMax="2.0"))
-	float FillerScaleRatio = 0.2f;
+	float FillerScaleRatio = 0.35f;
+
+	/** Instance SIZE, separate from the growth rate. Raising FillerScaleRatio so the medium tracks the zoom
+	 *  also makes every instance bigger, which is not what was wanted — the two were the same number and had
+	 *  to be split. Cutting size here pays back the overdraw that raising the ratio costs, so the cloud can
+	 *  follow the zoom without filling the frame. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.05", ClampMax="4.0"))
+	float FillerSizeScale = 0.55f;
+
+	/** Brightness of the medium. The colours below are hues; this is how hard they are pushed. The palette
+	 *  squeeze reads the authored colour, so dimming happens at write time rather than by desaturating the
+	 *  authored value — otherwise the squeeze would pull the dimmed colour back up. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.0", ClampMax="3.0"))
+	float FillerBrightness = 0.45f;
 
 	/** Clamp on the filler cloud's scale. Keep the max LOW: at 400 the instances inflate until each one fills
 	 *  the frame (that was the startup stall). 12 is the proven value — the medium fades out via FillerFade
 	 *  well before it would need to grow past it. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.01")) float FillerScaleMin = 0.5f;
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="1.0"))  float FillerScaleMax = 12.f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="1.0"))  float FillerScaleMax = 14.f;
 
 	/** Filler colours. The medium runs on M_StationMaster now (M_Filler had NO colour param — its colour was
 	 *  baked into the graph, which is exactly why the palette squeeze never reached the fillers). These are
@@ -758,6 +841,75 @@ private:
 	 *  Michael wanted this ~3x slower than the instant snap it replaced. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage") float LightFadeSpeed = 1.2f;
 
+	/** Lights reach FULL brightness once the station's fade passes this, instead of tracking it all the way
+	 *  to 1. Tying light intensity directly to the dissolve ramp meant the lab stayed dark until the mushroom
+	 *  was fully solid, and the 1.2 interpolator added ~2 s of lag on top — the first quarter of the descent
+	 *  was pitch black. A scene should be LIT while it dissolves in, not lit because it finished. On the way
+	 *  out this also keeps the light up until the station is nearly gone, so it erodes in daylight. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.05", ClampMax="1.0"))
+	float LightFadeKnee = 0.30f;
+
+	/** CAMERA DISSOLVE — surfaces melt open this close to the lens so you ENTER things instead of
+	 *  the near plane slicing them. Expressed as a fraction of the station's own size, not in
+	 *  absolute uu: the pawn multiplies these by the station's current scale before writing them,
+	 *  because a fixed bubble is meaningless when the world spans four orders of magnitude.
+	 *  Sized against STATION_SPAN_UU 3464: 350 is a tenth of a station, 1200 about a third. The
+	 *  first values (120/600) were tuned while the distance term was PixelDepth — depth along the
+	 *  view axis. Radial distance is the hypotenuse of that, so every off-axis surface reads as
+	 *  further away and the same bubble stopped reaching the conidium wall entirely. Same bubble,
+	 *  different ruler. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="4000.0"))
+	float CamGateStartUU = 350.f;
+
+	/** Distance over which a surface returns to solid, same scaling. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="1.0", ClampMax="12000.0"))
+	float CamGateRangeUU = 1200.f;
+
+	/** TUNNEL — the camera dissolve only bites inside a cone around the zoom axis, so it reads as
+	 *  drilling in rather than the surface evaporating everywhere at once. Deliberately a cone in
+	 *  WORLD space and not a screen vignette: Deep Space is an L, wall plus floor, rendered as
+	 *  separate nDisplay views, and anything keyed off screen UV would give each viewport its own
+	 *  centre — two bright spots instead of one opening, and the L stops reading as one space.
+	 *  Fully open within this half-angle of the axis. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="1.0", ClampMax="89.0"))
+	float TunnelInnerDeg = 40.f;
+
+	/** Beyond this half-angle the surface stays solid no matter how close it is. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="2.0", ClampMax="180.0"))
+	float TunnelOuterDeg = 85.f;
+
+	/** Tunnel follows where you are LOOKING rather than being pinned to the anchor. On, the axis is
+	 *  the current view forward, so free-look carries the opening with it; off, it always drills
+	 *  toward the anchor whatever the operator does. Either way it stays a world-space cone, which
+	 *  is what keeps wall and floor sharing one opening. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage")
+	bool bTunnelFollowsView = true;
+
+	/** "Lights turn on one by one" (Markos, 4.1). Each light on a station waits this much further into the
+	 *  station's fade before it starts coming up, in first-seen order — so a scene switches itself on in
+	 *  sequence instead of all at once. 0 = all together, as before. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="0.5"))
+	float LightStaggerStep = 0.07f;
+
+	/** Detents: depths where the descent gets sticky, so the operator can settle on a beat instead of
+	 *  holding the trigger against a moving target. These are the script's [PAUSE] marks. Empty = off. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel")
+	TArray<float> ZoomDetents;
+
+	/** How wide a detent's pull is, in ZoomProgress. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel", meta=(ClampMin="0.002", ClampMax="0.2"))
+	float DetentWidth = 0.025f;
+
+	/** Zoom rate multiplier at the exact centre of a detent. NOT zero — a detent that traps you is a bug,
+	 *  not a feature; you should always be able to push through by holding the trigger. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel", meta=(ClampMin="0.05", ClampMax="1.0"))
+	float DetentDamping = 0.35f;
+
+	/** Slow automatic orbit, degrees/sec, added to the operator's stick input. The camera still never
+	 *  moves — this rotates the world on the anchor, which is how 5.2's "orbit the nucleus" is done. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel", meta=(ClampMin="-20.0", ClampMax="20.0"))
+	float OrbitAutoYawDegPerSec = 0.f;
+
 	float OrbitYaw = 0.f, OrbitPitch = 0.f, ZoomVel = 0.f;
 	float PrevZoom = 0.f;      // for a cluster-consistent visual velocity (ZoomProgress delta, valid on every node)
 	float ObserverSize = 1.70f;
@@ -773,6 +925,14 @@ private:
 	void    SetStationFade(AActor* A, float Fade);   // push StationFade onto an actor's materials
 	void    UpdateCH4Cycle(float Dt);                // looping redox cycle at the NirA station
 	float   CH4Phase = 0.f;                          // 0..1, wraps forever
+	FVector TunnelAxis = FVector::ForwardVector;     // camera -> anchor, world space, shared by every viewport
+	int32   AudioLive = 0;                          // tracks actually spawned, for the readout
+	float   AudioPeak = 0.f;                        // loudest track's current multiplier
+	float   GateScale = 1.f;                         // station scale in flight, for the camera-dissolve bubble
+	float   CH4Cycles = 0.f;                         // cycles completed THIS visit; resets when the station leaves
+	TArray<float> StationFadeCache;                  // per-station fade, written by ApplyStations, read by UpdateLights
+	TMap<TWeakObjectPtr<ULightComponent>, int32> LightOrder;   // first-seen index, drives the one-by-one stagger
+	int32   LightOrderNext = 0;
 
 	/** FPS on the scene readout: instantaneous, and the MEDIAN over a window.
 	 *
@@ -793,13 +953,34 @@ private:
 	float   FpsMedian = 0.f;
 	float   FpsMedianTimer = 0.f;                    // resort a few times a second, not every frame
 
+	/** Readout diagnostic: which station currently dominates and what fade it is being given,
+	 *  next to how many cached DMIs actually carry a StationFade parameter. If a station is
+	 *  fading in the numbers but not on screen, this says whether the parameter has anywhere
+	 *  to land — SetStationFade only writes to materials that are ALREADY dynamic instances. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Info")
+	bool bShowFadeDiag = true;
+	int32 DiagStation = -1;
+	float DiagFade = 0.f;
+
 	void    UpdateRefParticles();                    // self-similar scale-reference field
+	/** Fade any actor tagged QZFade<N> with station N — visibility + StationFade on its materials,
+	 *  WITHOUT moving or scaling it. Lights already had a level-independent route (QZLight<N>);
+	 *  meshes, volumes and effects had none, so an environment asset dropped into a station
+	 *  sublevel just sat there at full brightness through the whole descent. */
+	void    UpdateFadeTagged();
+
 	void    UpdateCommsStreams(float Dt);            // per-station outward data traffic
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> CommsISM = nullptr;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic>      CommsMID = nullptr;
-	TArray<FVector> CommsDirs;                       // lane directions, generated once
+	TArray<FVector> CommsDirs;                       // lane seed directions, generated once
 	TArray<float>   CommsOffsets;
+	/** Meandering trails in UNIT space (radius 0..1), CommsSteps points per trail, laid out flat.
+	 *  Generated once from a fixed seed: a foraging path that is re-rolled every frame is not a
+	 *  path, it is noise, and the whole point is that these routes persist and are followed. */
+	TArray<FVector> CommsTrail;
+	int32           CommsTrailLanes = 0;
 	float           CommsClock = 0.f;
+	static constexpr int32 CommsSteps = 24;          // points per trail
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> RefISM = nullptr;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic>      RefMID = nullptr;
 	TArray<FVector> RefDirs;                         // unit directions, generated once

@@ -15,6 +15,8 @@
 #include "Components/AudioComponent.h"
 #include "Sound/SoundBase.h"
 #include "Sound/SoundAttenuation.h"
+#include "LevelSequenceActor.h"
+#include "LevelSequencePlayer.h"
 #include "Engine/PostProcessVolume.h"
 #include "Kismet/GameplayStatics.h"
 #include "DisplayClusterRootActor.h"   // free-look drives the DCRA in a cluster (nDisplay frustum source)
@@ -327,6 +329,7 @@ void AQZoomStagePawn::Tick(float Dt)
 	UpdateStreaks(Dt, VisVel, StreakIntensitySmoothed);
 	UpdateAudio();
 	UpdateFillers(Dt);   // molecular fillers: inherit orbit + self-swirl + zoom-scale
+	UpdateFadeTagged();  // QZFade<N>: environment assets that ride a station's fade without being one
 	UpdateLights();      // fade station-sublevel lights by their station's visibility (populated in ApplyStations)
 	ApplyStyleLight();   // every frame so the intensity EASES toward its ladder target (not just on press)
 	UpdateOxidation(Dt); // S3: ping-pong the sulfur-switch SVT frame (dwell -> snap -> dwell)
@@ -365,9 +368,31 @@ void AQZoomStagePawn::PollInput(float Dt)
 	float LT = PC->GetInputAnalogKeyState(EKeys::Gamepad_LeftTriggerAxis);
 	if (PC->IsInputKeyDown(EKeys::W)) RT = FMath::Max(RT, 1.f);   // Up/Down freed for PP presets
 	if (PC->IsInputKeyDown(EKeys::S)) LT = FMath::Max(LT, 1.f);
-	const float Target = (RT - LT) * BaseZoomRate;
+	float Target = (RT - LT) * BaseZoomRate;
+
+	// DETENTS — the script's [PAUSE] marks made physical. Near an authored depth the descent gets heavy,
+	// so the operator can settle on a beat and talk over it instead of fighting the trigger to hold still.
+	// Deliberately a damping factor and not a stop: DetentDamping is clamped above zero, so holding the
+	// trigger always pulls through. A detent you cannot leave is a trap, not a rest.
+	if (ZoomDetents.Num() > 0 && DetentWidth > 1e-4f)
+	{
+		float Nearest = BIG_NUMBER;
+		for (float D : ZoomDetents) Nearest = FMath::Min(Nearest, FMath::Abs(ZoomProgress - D));
+		if (Nearest < DetentWidth)
+		{
+			const float T = Nearest / DetentWidth;                       // 0 at the centre, 1 at the edge
+			Target *= FMath::Lerp(FMath::Clamp(DetentDamping, 0.05f, 1.f), 1.f, T * T * (3.f - 2.f * T));
+		}
+	}
+
 	ZoomVel = FMath::FInterpTo(ZoomVel, Target, Dt, SpeedDamping);
 	ZoomProgress = FMath::Clamp(ZoomProgress + ZoomVel * Dt, 0.f, 1.f);
+
+	// Slow automatic orbit on top of the stick. The world turns; the camera and the DCRA do not.
+	if (!FMath::IsNearlyZero(OrbitAutoYawDegPerSec))
+	{
+		OrbitYaw = FMath::Fmod(OrbitYaw + OrbitAutoYawDegPerSec * Dt, 360.f);
+	}
 
 	// Look-around ORBITS the content (camera stays fixed → DCRA stays fixed).
 	const float DZ = 0.15f;
@@ -666,29 +691,30 @@ void AQZoomStagePawn::UpdateCommsStreams(float Dt)
 	{
 		Comms.SetNum(StationCount);
 		auto Set = [this](int32 i, int32 lanes, int32 per, float spd, float len, float thick,
-		                  float wander, float twist, float burst, FLinearColor c, float bright)
+		                  float wander, float commit, float branch, float blinkHz,
+		                  float burst, FLinearColor c, float bright)
 		{
 			if (!Comms.IsValidIndex(i)) return;
 			FQZComms& E = Comms[i];
 			E.Lanes = lanes; E.PerLane = per; E.Speed = spd; E.LengthUU = len;
-			E.Thickness = thick; E.Wander = wander; E.Twist = twist; E.Burst = burst;
-			E.Color = c; E.Brightness = bright;
+			E.Thickness = thick; E.Wander = wander; E.Commit = commit; E.Branch = branch;
+			E.BlinkHz = blinkHz; E.Burst = burst; E.Color = c; E.Brightness = bright;
 		};
-		//     idx lanes per  speed  len  thick wander twist burst  colour                       bright
-		// S0 forest: few, slow, wide and wandering — spores and scent on the air, barely directed
-		Set(0,  9, 14, 0.055f, 150.f, 0.30f, 0.55f, 0.15f, 0.00f, FLinearColor(0.95f,0.78f,0.42f), 2.6f);
-		// S1 mycelium: THE network. Many tight lanes, steady heavy traffic — the literal case
-		Set(1, 26, 30, 0.130f, 120.f, 0.10f, 0.10f, 0.55f, 0.00f, FLinearColor(0.62f,0.92f,0.70f), 4.2f);
-		// S2 conidium: a spore broadcasting. Few lanes, hard bursts, long gaps between calls
-		Set(2, 12, 16, 0.190f, 105.f, 0.20f, 0.28f, 0.30f, 0.62f, FLinearColor(1.00f,0.72f,0.38f), 4.6f);
-		// S3 NirA: protein signalling. Purposeful, fast, tightly channelled
-		Set(3, 18, 24, 0.260f,  80.f, 0.12f, 0.12f, 0.70f, 0.00f, FLinearColor(0.55f,0.80f,1.00f), 4.4f);
-		// S4 Met169: the switch. Sparse deliberate pulses — one packet at a time, and it matters
-		Set(4,  7, 10, 0.330f,  70.f, 0.26f, 0.06f, 0.20f, 0.55f, FLinearColor(1.00f,0.66f,0.20f), 6.0f);
-		// S5 density: probability, not messages. Many faint short flickers, almost a shimmer
-		Set(5, 34, 34, 0.150f,  40.f, 0.40f, 0.70f, 0.90f, 0.00f, FLinearColor(0.80f,0.72f,1.00f), 3.0f);
-		// S6 nucleus: the fastest exchange there is. Very short, very quick, very bright
-		Set(6, 22, 40, 0.720f,  34.f, 0.16f, 0.20f, 1.40f, 0.00f, FLinearColor(0.70f,0.90f,1.00f), 7.0f);
+		//   idx lanes per  speed  len  thick wander commit branch blink burst  colour                          bright
+		// S0 forest: few slow trails that wander a lot and commit little — scent on the air, barely aimed
+		Set(0,  8, 12, 0.045f, 170.f, 0.30f, 0.62f, 0.12f, 0.30f, 1.1f, 0.00f, FLinearColor(0.95f,0.78f,0.42f), 3.0f);
+		// S1 mycelium: THE foraging network. Heavy branching, hard commitment — a solved path
+		Set(1, 26, 26, 0.115f, 130.f, 0.10f, 0.30f, 0.55f, 0.72f, 2.4f, 0.00f, FLinearColor(0.62f,0.96f,0.72f), 5.0f);
+		// S2 conidium: a spore CALLING. Few trails, hard bursts, fast nervous blink
+		Set(2, 12, 16, 0.170f, 115.f, 0.20f, 0.48f, 0.26f, 0.35f, 5.5f, 0.62f, FLinearColor(1.00f,0.72f,0.38f), 5.4f);
+		// S3 NirA: protein signalling — searches briefly, then commits hard and runs
+		Set(3, 18, 22, 0.240f,  95.f, 0.12f, 0.28f, 0.66f, 0.40f, 3.0f, 0.00f, FLinearColor(0.55f,0.82f,1.00f), 5.2f);
+		// S4 Met169: the switch. Sparse deliberate pulses, slow heavy blink — one packet matters
+		Set(4,  7, 10, 0.300f,  85.f, 0.26f, 0.22f, 0.60f, 0.20f, 1.6f, 0.55f, FLinearColor(1.00f,0.66f,0.20f), 7.0f);
+		// S5 density: probability, not messages. Many faint trails wandering with almost no commitment
+		Set(5, 32, 30, 0.130f,  55.f, 0.38f, 0.80f, 0.08f, 0.55f, 7.5f, 0.00f, FLinearColor(0.82f,0.74f,1.00f), 3.6f);
+		// S6 nucleus: the fastest exchange there is — short, quick, near-strobing
+		Set(6, 22, 36, 0.640f,  45.f, 0.16f, 0.34f, 0.70f, 0.45f, 11.0f, 0.00f, FLinearColor(0.72f,0.92f,1.00f), 8.0f);
 	}
 
 	// Which station is actually on screen, and how strongly. Traffic belongs to the thing you are
@@ -697,16 +723,17 @@ void AQZoomStagePawn::UpdateCommsStreams(float Dt)
 	float BestFade = 0.f, BestScale = 1.f;
 	for (int32 N = 0; N < StationCount; ++N)
 	{
+		// Use the value ApplyStations already computed for this station. This loop used to re-derive
+		// it from the GLOBAL MinVis/MaxVis/fade widths, ignoring every per-station handover — so
+		// once stations 0, 1 and 2 were given handovers it could find no station in band at all and
+		// reported S-1 with fade 0.00 (visible on the readout at DEPTH 65%, standing inside MET169).
+		// Anything keyed off "which station is dominant" was wrong from that point on.
+		float F = StationFadeCache.IsValidIndex(N) ? StationFadeCache[N] : 0.f;
 		const float S = StationScale(N);
-		const float lnMin = FMath::Loge(FMath::Max(MinVisScale, 1e-30f));
-		const float lnMax = FMath::Loge(FMath::Max(MaxVisScale, MinVisScale * 2.f));
-		const float LogS = FMath::Loge(FMath::Max(S, 1e-30f));
-		const float Up = FMath::Clamp((LogS - lnMin) / FMath::Max(StationFadeWidth, 1e-3f), 0.f, 1.f);
-		const float Dn = FMath::Clamp((lnMax - LogS) / FMath::Max(StationFadeWidth, 1e-3f), 0.f, 1.f);
-		float F = Up * Dn;
-		F = F * F * (3.f - 2.f * F);
 		if (F > BestFade) { BestFade = F; Best = N; BestScale = S; }
 	}
+	DiagStation = Best;   // reused by the readout diagnostic
+	DiagFade = BestFade;
 	if (Best < 0 || !Comms.IsValidIndex(Best) || BestFade <= 0.002f)
 	{
 		if (CommsISM) CommsISM->SetVisibility(false);
@@ -741,18 +768,67 @@ void AQZoomStagePawn::UpdateCommsStreams(float Dt)
 		CommsMID->SetScalarParameterValue(TEXT("Emissive"), C.Brightness * BestFade);
 	}
 
-	// Lane directions are generated ONCE from a fixed seed. Re-rolling them per frame would make
-	// the routes flicker rather than persist, and a route that does not persist is not a route.
+	// ---- FORAGING TRAILS, not spokes --------------------------------------------------------
+	// An Ameisenstrasse does not radiate, it SEARCHES: it casts about, corrects, commits, and
+	// splits. So each trail is a random walk that is pulled outward while being allowed to drift
+	// sideways, and a fraction of trails BRANCH off an existing one partway along instead of
+	// starting at the centre. Straight lanes with a wobble read as engineered; this reads as
+	// explored, which is the "not yet understood inner workings" the piece is after.
+	//
+	// Generated ONCE from a fixed seed. A path re-rolled per frame is not a path, it is noise —
+	// and the whole idea depends on these routes persisting so they can be followed.
 	const int32 MaxLanes = 64;
-	if (CommsDirs.Num() != MaxLanes)
+	if (CommsTrail.Num() != MaxLanes * CommsSteps || CommsTrailLanes != C.Lanes)
 	{
+		CommsTrailLanes = C.Lanes;
+		CommsTrail.SetNum(MaxLanes * CommsSteps);
 		CommsDirs.SetNum(MaxLanes);
 		CommsOffsets.SetNum(MaxLanes);
 		FRandomStream R(90210);
-		for (int32 i = 0; i < MaxLanes; ++i)
+
+		for (int32 l = 0; l < MaxLanes; ++l)
 		{
-			CommsDirs[i] = R.GetUnitVector();
-			CommsOffsets[i] = R.GetFraction();
+			CommsDirs[l] = R.GetUnitVector();
+			CommsOffsets[l] = R.GetFraction();
+
+			// branch: start partway along an EARLIER trail rather than at the centre
+			const bool bBranch = (l > 2) && (R.GetFraction() < C.Branch);
+			const int32 Parent = bBranch ? R.RandRange(0, l - 1) : -1;
+			const int32 Split = bBranch ? R.RandRange(3, CommsSteps / 2) : 0;
+
+			FVector Pos = FVector::ZeroVector;
+			FVector Head = CommsDirs[l];
+			if (Parent >= 0)
+			{
+				Pos = CommsTrail[Parent * CommsSteps + Split];
+				// leave the parent at an angle, so the split is legible as a split
+				Head = (Pos.GetSafeNormal() + R.GetUnitVector() * 0.9f).GetSafeNormal();
+			}
+
+			for (int32 s = 0; s < CommsSteps; ++s)
+			{
+				if (Parent >= 0 && s < Split)
+				{
+					// share the parent's path up to the split point
+					CommsTrail[l * CommsSteps + s] = CommsTrail[Parent * CommsSteps + s];
+					continue;
+				}
+				CommsTrail[l * CommsSteps + s] = Pos;
+
+				// wander sideways, then COMMIT back toward straight-out. The tension between the
+				// two is the searching read: pure wander drifts and never arrives, pure commit
+				// marches in a line.
+				const FVector Radial = Pos.IsNearlyZero() ? CommsDirs[l] : Pos.GetSafeNormal();
+				const FVector Jitter = R.GetUnitVector() * C.Wander;
+				Head = (Head + Jitter + Radial * C.Commit * 1.6f).GetSafeNormal();
+				Pos += Head * (1.f / CommsSteps);
+			}
+		}
+		// normalise every trail so its far end sits at unit radius, whatever route it took
+		for (int32 l = 0; l < MaxLanes; ++l)
+		{
+			const float End = FMath::Max(CommsTrail[l * CommsSteps + CommsSteps - 1].Size(), KINDA_SMALL_NUMBER);
+			for (int32 s = 0; s < CommsSteps; ++s) CommsTrail[l * CommsSteps + s] /= End;
 		}
 	}
 	if (CommsISM->GetInstanceCount() != Total)
@@ -769,24 +845,27 @@ void AQZoomStagePawn::UpdateCommsStreams(float Dt)
 	const float Rout = Span * CommsOuterFrac;
 	const FRotator Orbit(OrbitPitch, OrbitYaw, 0.f);
 
+	// sample a trail at t in 0..1, interpolating between its stored points
+	auto TrailAt = [this](int32 lane, float t) -> FVector
+	{
+		const float u = FMath::Clamp(t, 0.f, 1.f) * (CommsSteps - 1);
+		const int32 i = FMath::Clamp((int32)u, 0, CommsSteps - 2);
+		return FMath::Lerp(CommsTrail[lane * CommsSteps + i],
+		                   CommsTrail[lane * CommsSteps + i + 1], u - (float)i);
+	};
+
 	int32 idx = 0;
 	for (int32 l = 0; l < C.Lanes && idx < Total; ++l)
 	{
-		const FVector Dir = CommsDirs[l % MaxLanes];
-		// a stable perpendicular, for wander and twist
-		FVector Side = FVector::CrossProduct(Dir, FVector::UpVector);
-		if (Side.SizeSquared() < 1e-4f) Side = FVector::CrossProduct(Dir, FVector::ForwardVector);
-		Side.Normalize();
-		const FVector Up2 = FVector::CrossProduct(Dir, Side).GetSafeNormal();
-
+		const int32 Lane = l % MaxLanes;
 		for (int32 p = 0; p < C.PerLane && idx < Total; ++p, ++idx)
 		{
-			float f = FMath::Frac(CommsOffsets[l % MaxLanes]
+			float f = FMath::Frac(CommsOffsets[Lane]
 			                      + (float)p / FMath::Max(C.PerLane, 1)
 			                      + CommsClock * C.Speed);
 
-			// BURST: squeeze the whole lane's traffic into the first part of the cycle, so packets
-			// leave in clumps with silence between — a station that CALLS rather than streams.
+			// BURST: squeeze a trail's traffic into part of the cycle, so packets leave in clumps
+			// with silence between — a station that CALLS rather than streams.
 			float Gate = 1.f;
 			if (C.Burst > 0.f)
 			{
@@ -795,25 +874,35 @@ void AQZoomStagePawn::UpdateCommsStreams(float Dt)
 				else         { f = f / FMath::Max(Win, 1e-3f); }
 			}
 
-			const float Rad = FMath::Lerp(Rin, Rout, f);
-			const float Ang = f * C.Twist * PI * 2.f;
-			const float Wob = C.Wander * Span * 0.12f;
-			const FVector Local =
-				Dir * Rad
-				+ Side * (FMath::Sin(Ang + l) * Wob + FMath::Sin(f * 9.f + l) * Wob * 0.4f)
-				+ Up2 * (FMath::Cos(Ang + l) * Wob);
+			// follow the meandering route rather than a straight radius
+			const FVector Unit = TrailAt(Lane, f);
+			const FVector Local = Unit * FMath::Lerp(Rin, Rout, 1.f) * 1.f
+			                    + Unit.GetSafeNormal() * 0.f;
+			const FVector Pos = Unit * (Rin + (Rout - Rin) * Unit.Size());
 
-			// fade in as it leaves, out as it arrives — no packets appearing or vanishing mid-air
-			const float A = FMath::Min(FMath::Clamp(f / 0.14f, 0.f, 1.f),
-			                           FMath::Clamp((1.f - f) / 0.22f, 0.f, 1.f)) * Gate;
-			const float Len = C.LengthUU * BestScale * FMath::Max(A, 0.f);
+			// BLINK — each packet winks on its own phase, so the trail reads as signalling and
+			// not as a conveyor belt. Driven through SCALE because one shared MID cannot carry a
+			// per-instance brightness without custom data, and a packet scaled to nothing is off.
+			const float Ph = (CommsClock * C.BlinkHz + (float)p * 0.37f + (float)Lane * 0.11f);
+			const float Blink = 1.f - C.BlinkDepth * (0.5f + 0.5f * FMath::Sin(Ph * 2.f * PI));
+
+			// fade in on departure, out on arrival — nothing appears or vanishes mid-flight
+			const float Edge = FMath::Min(FMath::Clamp(f / 0.14f, 0.f, 1.f),
+			                              FMath::Clamp((1.f - f) / 0.22f, 0.f, 1.f));
+			// packets grow as they travel out, so the trail has a direction at a glance
+			const float Grow = 1.f + C.OutwardGain * f;
+			const float A = Edge * Gate * Blink;
+
+			const float Len = C.LengthUU * BestScale * Grow * FMath::Max(A, 0.f);
 			const float Thk = Len * C.Thickness;
 
-			// aligned to travel, so each packet reads as a dash with direction, not a dot
-			const FVector Fwd = (Local.GetSafeNormal() + Dir).GetSafeNormal();
-			const FQuat Rot = FRotationMatrix::MakeFromX(Fwd).ToQuat();
+			// aligned to the LOCAL trail direction, so a dash follows the bend of its own path
+			const FVector Ahead = TrailAt(Lane, FMath::Min(f + 0.03f, 1.f));
+			FVector Fwd = (Ahead - Unit);
+			if (Fwd.IsNearlyZero()) Fwd = Unit.GetSafeNormal();
+			const FQuat Rot = FRotationMatrix::MakeFromX(Fwd.GetSafeNormal()).ToQuat();
 			const FTransform T(Orbit.Quaternion() * Rot,
-			                   Anchor + Orbit.RotateVector(Local),
+			                   Anchor + Orbit.RotateVector(Pos),
 			                   FVector(FMath::Max(Len, 0.01f), FMath::Max(Thk, 0.01f),
 			                           FMath::Max(Thk, 0.01f)) / 100.f);  // BasicShapes/Cube is 100uu
 			CommsISM->UpdateInstanceTransform(idx, T, true, (idx == Total - 1), false);
@@ -942,7 +1031,18 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 	const bool bStationUp = (S > MinVisScale && S < MaxVisScale);
 	if (bStationUp)
 	{
-		CH4Phase = FMath::Fmod(CH4Phase + Dt / FMath::Max(CH4CycleSeconds, 0.01f), 1.f);
+		// 4.6, "watch that whole process again, faster this time". Dwell is the trigger: the first pass
+		// runs at full 90 s so the beats can be read, and each repeat compresses toward CH4SpeedMax. An
+		// operator who lingers on the switch gets the speed-up for free; one who moves on never sees it.
+		const float Mul = 1.f + (CH4SpeedMax - 1.f)
+			* FMath::Clamp(CH4Cycles / FMath::Max(CH4SpeedRampCycles, 0.01f), 0.f, 1.f);
+		const float Step = Dt / FMath::Max(CH4CycleSeconds, 0.01f) * Mul;
+		CH4Phase = FMath::Fmod(CH4Phase + Step, 1.f);
+		CH4Cycles += Step;
+	}
+	else
+	{
+		CH4Cycles = 0.f;   // leaving the station resets it, so the next visit starts slow and readable again
 	}
 
 	// Approach lines. The oxidase comes straight down the Met169 axis; the reductase arrives on a
@@ -986,7 +1086,32 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 		return F * F * (3.f - 2.f * F);
 	};
 
-	const float StationFadeNow = bStationUp ? 1.f : 0.f;
+	// SMOOTH, not binary. This used to be (bStationUp ? 1 : 0), so the instant the station left
+	// its band the partner's visibility snapped 1 -> 0 and the molecule vanished in one frame.
+	// Presence already ramps within the cycle; what was missing was the station's own ramp.
+	// StationFadeCache is the smoothstepped value ApplyStations computed this frame.
+	const float StationFadeNow = StationFadeCache.IsValidIndex(CH4Station)
+		? StationFadeCache[CH4Station]
+		: (bStationUp ? 1.f : 0.f);
+
+	// SEQUENCER. Scrubbed, never played: the sequence has no clock of its own, it is a curve
+	// indexed by CH4Phase. So it inherits everything the code path had — frozen when the station
+	// is off screen, accelerating with dwell — while the shape of the motion becomes editable on
+	// a timeline. Tagged rather than referenced so the level can be re-authored without a rebuild.
+	if (bCH4UseSequencer)
+	{
+		for (TActorIterator<ALevelSequenceActor> It2(W); It2; ++It2)
+		{
+			ALevelSequenceActor* SA = *It2;
+			if (!SA || !SA->Tags.Contains(FName(TEXT("QZCH4Sequence")))) continue;
+			if (ULevelSequencePlayer* Pl = SA->GetSequencePlayer())
+			{
+				const float T = CH4Phase * FMath::Max(CH4SequenceSeconds, 0.01f);
+				Pl->SetPlaybackPosition(
+					FMovieSceneSequencePlaybackParams(T, EUpdatePositionMethod::Scrub));
+			}
+		}
+	}
 
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
@@ -1001,9 +1126,24 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 		                                          : Presence(CH4Phase, 0.622f, 1.00f));
 
 		// Relative to the station pivot, so the pawn's exp() scale carries them automatically.
-		A->SetActorRelativeLocation(Local);
-		A->SetActorHiddenInGame(Vis <= 0.002f);
-		if (Vis > 0.002f) SetStationFade(A, Vis);
+		// When Sequencer owns the motion the pawn must not also write it, or the two fight and
+		// the last writer of the frame wins — which reads as jitter, not as a conflict.
+		if (!bCH4UseSequencer) A->SetActorRelativeLocation(Local);
+		// HIDE THE CHILDREN TOO. SetActorHiddenInGame does not propagate to attached actors, and
+		// the partner stopped being a single mesh the moment it became a molecule: the tagged
+		// actor is now a bare pivot with eight orbital meshes under it. Hiding the pivot alone
+		// left all eight on screen for the rest of the descent — a molecule floating through the
+		// nucleus. Same reason the fade has to reach them: their materials are StationFade-masked.
+		const bool bHide = (Vis <= 0.002f);
+		A->SetActorHiddenInGame(bHide);
+		TArray<AActor*> Kids;
+		A->GetAttachedActors(Kids);
+		for (AActor* Ch : Kids) Ch->SetActorHiddenInGame(bHide);
+		if (!bHide)
+		{
+			SetStationFade(A, Vis);
+			for (AActor* Ch : Kids) SetStationFade(Ch, Vis);
+		}
 	}
 }
 
@@ -1048,11 +1188,14 @@ void AQZoomStagePawn::ApplyStations()
 		// tag for Dissolve, preserved for stations already tuned that way).
 		float StMinVis   = MinVisScale;
 		float StFadeW    = StationFadeWidth;
+		float StFadeOutW = (StationFadeOutWidth > 0.f) ? StationFadeOutWidth : StationFadeWidth;
 		if (Handover.IsValidIndex(N) && Handover[N].bEnabled)
 		{
 			StMinVis = Handover[N].InitialSize;
 			StFadeW  = Handover[N].FadeIn;
 			StMaxVis = Handover[N].Dissolve;   // the struct's Dissolve beats the QZMaxVis tag
+			// FadeOut 0 means "same as FadeIn", so stations tuned before the split keep their behaviour.
+			StFadeOutW = (Handover[N].FadeOut > 0.f) ? Handover[N].FadeOut : StFadeW;
 		}
 		const float StLnMin = FMath::Loge(FMath::Max(StMinVis, 1e-30f));
 		const float LnMaxS  = FMath::Loge(FMath::Max(StMaxVis, StMinVis * 2.f));
@@ -1060,12 +1203,18 @@ void AQZoomStagePawn::ApplyStations()
 		const float S    = StationScale(N);
 		const float LogS = FMath::Loge(FMath::Max(S, 1e-30f));
 		// soft cross-fade: 1 inside the band, ramping to 0 over the fade width at each edge (prev/next dissolve).
-		const float Up = FMath::Clamp((LogS - StLnMin) / FMath::Max(StFadeW, 1e-3f), 0.f, 1.f);
-		const float Dn = FMath::Clamp((LnMaxS - LogS) / FMath::Max(StFadeW, 1e-3f), 0.f, 1.f);
+		const float Up = FMath::Clamp((LogS - StLnMin) / FMath::Max(StFadeW,    1e-3f), 0.f, 1.f);
+		const float Dn = FMath::Clamp((LnMaxS - LogS) / FMath::Max(StFadeOutW, 1e-3f), 0.f, 1.f);
 		float Fade = Up * Dn;
 		Fade = Fade * Fade * (3.f - 2.f * Fade);   // smoothstep
 		bool bVis = (Fade > 0.002f);
 		if (Ver >= 0 && Ver != NiraVersion) bVis = false;   // inactive version -> hidden
+
+		// Publish it. UpdateLights used to re-derive a station's visibility with its own binary test
+		// (Sc > MinVisScale && Sc < MaxVisScale), which ignored the handover overrides entirely — so a
+		// tagged light popped on at a different depth than the geometry it was lighting. Same number now.
+		StationFadeCache.SetNumZeroed(FMath::Max(StationCount, N + 1));
+		StationFadeCache[N] = bVis ? Fade : 0.f;
 
 		if (ULevel* Lvl = A->GetLevel())
 		{
@@ -1088,6 +1237,30 @@ void AQZoomStagePawn::ApplyStations()
 		if (bVis)
 		{
 			A->SetActorTransform(FTransform(Orbit, Anchor, FVector(S)));   // children follow via attachment
+			// The camera-dissolve bubble has to grow with the world. PixelDepth is in world units
+			// and the station's world size is 3464*S, so a FIXED 120 uu bubble is 3.5% of the
+			// object at S=1 and 0.3% at S=11 — which is why the mushroom never opened: standing
+			// inside a cap scaled 11x, every surface around you is thousands of units away, well
+			// outside a fixed bubble, so nothing is "near" and nothing dissolves. Scaling it by S
+			// keeps "near" meaning the same fraction of whatever you are inside.
+			GateScale = S;
+			// FREE LOOK AND ORBIT. Taken from the pawn's own Camera COMPONENT, not from
+			// GetPlayerViewPoint. The player controller hands back the CONTROL rotation, and the
+			// right stick moves that even though the camera itself never turns — free look orbits
+			// the world instead. So the cone drifted away from the content while the picture stayed
+			// put, and the dissolve quietly stopped a few seconds after anyone touched the stick.
+			//
+			// The camera component is the view that is actually rendered: unchanged by orbit (so the
+			// opening stays centred while the content spins through it) and correct if something
+			// really does turn the camera. Both behaviours come out of the same vector.
+			const FVector CamLoc = Camera ? Camera->GetComponentLocation() : GetActorLocation();
+			TunnelAxis = FVector::ZeroVector;
+			if (bTunnelFollowsView && Camera)
+			{
+				TunnelAxis = Camera->GetForwardVector();
+			}
+			if (TunnelAxis.IsNearlyZero()) TunnelAxis = (Anchor - CamLoc).GetSafeNormal();
+			if (TunnelAxis.IsNearlyZero()) TunnelAxis = GetActorForwardVector();
 			SetStationFade(A, Fade);
 			for (AActor* Ch : Attached) SetStationFade(Ch, Fade);
 		}
@@ -1133,8 +1306,62 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade)
 			if (UMaterialInstanceDynamic* DMI = Cast<UMaterialInstanceDynamic>(PC->GetMaterial(m)))
 			{
 				DMI->SetScalarParameterValue(TEXT("StationFade"), Fade);
+
+				// StationDissolve — for the HARD-SURFACE masters (M_NiraMaster's animated net,
+				// M_StationMaster, M_CPK, M_Nidulans). Those masks were never built around
+				// StationFade at all, which is why the organic NirA dissolved and the hard-surface
+				// one never did (Michael's observation, and it was the whole diagnosis). Rather
+				// than rewire their mask logic — which destroyed M_NiraMaster's net once — their
+				// existing mask is post-multiplied by this gate. At 1 nothing changes at all; at 0
+				// the mask goes to zero and the material clips away.
+				//
+				// Deliberately NOT smoothed the same way: multiplying a mask by a fade gives a
+				// hard-edged wipe rather than an eroding one. Curved so the surface holds until
+				// the fade is genuinely low instead of thinning out through the whole band.
+				DMI->SetScalarParameterValue(TEXT("StationDissolve"),
+				                             FMath::Clamp(Fade * 1.6f, 0.f, 1.f));
+
+				// Bubble sized against the station currently being drawn.
+				const float G = FMath::Max(GateScale, 1e-4f);
+				DMI->SetScalarParameterValue(TEXT("CamFadeStart"), CamGateStartUU * G);
+				DMI->SetScalarParameterValue(TEXT("CamFadeRange"), FMath::Max(CamGateRangeUU * G, 1.f));
+
+				// The cone, in world space so wall and floor share one opening.
+				DMI->SetVectorParameterValue(TEXT("TunnelAxis"),
+					FLinearColor(TunnelAxis.X, TunnelAxis.Y, TunnelAxis.Z, 0.f));
+				DMI->SetScalarParameterValue(TEXT("TunnelInnerCos"),
+					FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(TunnelInnerDeg, 1.f, 89.f))));
+				DMI->SetScalarParameterValue(TEXT("TunnelOuterCos"),
+					FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(TunnelOuterDeg, 2.f, 180.f))));
 			}
 		}
+	}
+}
+
+void AQZoomStagePawn::UpdateFadeTagged()
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		AActor* A = *It;
+		int32 N = -1;
+		for (const FName& T : A->Tags)
+		{
+			const FString Ts = T.ToString();
+			if (Ts.StartsWith(TEXT("QZFade"))) { N = FCString::Atoi(*Ts.Mid(6)); break; }
+		}
+		if (N < 0) continue;
+
+		// The value ApplyStations already computed. Nothing is moved or scaled — an environment
+		// asset keeps whatever placement it was authored with and only its visibility rides the
+		// station. Attaching it to the pivot instead would drag it through the exp() scale, which
+		// is right for a station's own geometry and wrong for a backdrop.
+		const float F = StationFadeCache.IsValidIndex(N) ? StationFadeCache[N] : 0.f;
+		const bool bVis = (F > 0.002f);
+		A->SetActorHiddenInGame(!bVis);
+		for (AActor* Ch : TArray<AActor*>()) { (void)Ch; }
+		if (bVis) SetStationFade(A, F);
 	}
 }
 
@@ -1156,6 +1383,14 @@ void AQZoomStagePawn::UpdateLights()
 		// The style light is pawn-owned (LB/RB drives its absolute intensity ladder). Skip it here or the two
 		// writers fight per-frame and the shoulder buttons go erratic.
 		if (A->Tags.Contains(FName(TEXT("QZStyleLight")))) continue;
+
+		// GLOBAL RIG — never faded by anything. The key/fill live in the PERSISTENT level, and the
+		// persistent level also holds stations 1, 2 and 3. So "fade lights by the level they sit in"
+		// silently made the whole rig follow the MYCELIUM: the scene stayed pitch black until station 1
+		// appeared, and pushing that onset to ZP 0.24 to stop the mycelium poking through the mushroom
+		// turned it into a quarter of the descent in the dark. Level membership is a fine rule for an
+		// accent light inside a station sublevel and a wrong one for a rig that serves all 13 decades.
+		if (A->Tags.Contains(FName(TEXT("QZGlobalLight")))) continue;
 
 		// TWO ways a light can follow a station, and the TAG is the one to author against.
 		//
@@ -1182,9 +1417,9 @@ void AQZoomStagePawn::UpdateLights()
 		float Fade = 0.f;
 		if (TagStation >= 0)
 		{
-			// Same band test ApplyStations uses, so a tagged light tracks its station exactly.
-			const float Sc = StationScale(TagStation);
-			Fade = (Sc > MinVisScale && Sc < MaxVisScale) ? 1.f : 0.f;
+			// The value ApplyStations actually used this frame — not a re-derivation. The old binary test
+			// here read the GLOBAL MinVis/MaxVis and so ignored every per-station handover override.
+			Fade = StationFadeCache.IsValidIndex(TagStation) ? StationFadeCache[TagStation] : 0.f;
 		}
 		else if (TrackedLevels.Contains(A->GetLevel()))
 		{
@@ -1203,10 +1438,19 @@ void AQZoomStagePawn::UpdateLights()
 			const TWeakObjectPtr<ULightComponent> Key(LC);
 			float* bp = LightBaseIntensity.Find(Key);
 			if (!bp) { bp = &LightBaseIntensity.Add(Key, LC->Intensity); }   // capture authored intensity once
+
+			// ONE BY ONE. Each light waits a little further into the station's fade before it starts,
+			// in first-seen order, then rises over the knee. The knee is why a scene is lit WHILE it
+			// dissolves in rather than once it is already solid; the stagger is why it arrives as a
+			// sequence. Both are per light, so the last one is still climbing as the first sits at full.
+			int32* op = LightOrder.Find(Key);
+			if (!op) { op = &LightOrder.Add(Key, LightOrderNext++); }
+			const float Lit = FMath::Clamp((Fade - LightStaggerStep * (float)(*op))
+			                               / FMath::Max(LightFadeKnee, 0.01f), 0.f, 1.f);
 			// PROLONG the fade (Michael, 3x): ease the applied fade toward the station's target instead of
 			// snapping to it. LightFadeSpeed lower = slower ramp. Per-light smoothed value so each light lags.
 			float& sm = LightFadeSmoothed.FindOrAdd(Key);
-			sm = FMath::FInterpTo(sm, Fade, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
+			sm = FMath::FInterpTo(sm, Lit, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
 			                      FMath::Max(LightFadeSpeed, 0.01f));
 			LC->SetIntensity(*bp * sm);
 		}
@@ -1217,8 +1461,10 @@ void AQZoomStagePawn::UpdateLights()
 			const TWeakObjectPtr<AActor> Key(A);
 			float* bw = PPBaseWeight.Find(Key);
 			if (!bw) { bw = &PPBaseWeight.Add(Key, PPV->BlendWeight); }   // capture authored weight once
+			// Same knee as the lights, but never staggered: a grade is one thing, not a sequence.
+			const float PPLit = FMath::Clamp(Fade / FMath::Max(LightFadeKnee, 0.01f), 0.f, 1.f);
 			float& pps = PPFadeSmoothed.FindOrAdd(Key);
-			pps = FMath::FInterpTo(pps, Fade, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
+			pps = FMath::FInterpTo(pps, PPLit, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
 			                       FMath::Max(LightFadeSpeed, 0.01f));
 			PPV->BlendWeight = *bw * pps;
 		}
@@ -1760,6 +2006,38 @@ void AQZoomStagePawn::UpdateReadout()
 	if (bShowFPS)
 		FpsLine = FString::Printf(TEXT("\nFPS        %.0f  |  median %.0f  (%.0fs)"),
 			FpsCurrent, FpsMedian, FpsWindowSeconds);
+	// Does StationFade have anywhere to LAND? SetStationFade only writes to materials that are
+	// already dynamic instances, so a station with 0 fadeable DMIs jumps straight from opaque to
+	// hidden however smooth the curve is. This line distinguishes the two cases on sight.
+	FString FadeLine;
+	if (bShowFadeDiag)
+	{
+		// READ THE VALUE BACK OUT. Counting fadeable DMIs only proves the parameter exists; it
+		// says nothing about whether SetStationFade's write actually lands. The conidium has now
+		// been cleared by inspection on every other axis — instance overrides, master wiring,
+		// blend mode, clip value, parameter values, Nanite config — so the one remaining question
+		// is whether the material is receiving the number at all. Min/max of what the DMIs report
+		// answers it: if the band stays pinned at 1.00 while the station's fade is mid-dissolve,
+		// the write is not reaching them; if it tracks, the fault is downstream in the shader.
+		int32 NFade = 0;
+		float LoFade = 9.f, HiFade = -9.f;
+		for (const FQZMat& E : MatCache)
+		{
+			if (!E.bHasFade) continue;
+			++NFade;
+			float V = 0.f;
+			UMaterialInstanceDynamic* D = E.DMI.Get();   // TWeakObjectPtr has no operator bool
+			if (D && D->GetScalarParameterValue(TEXT("StationFade"), V))
+			{
+				LoFade = FMath::Min(LoFade, V);
+				HiFade = FMath::Max(HiFade, V);
+			}
+		}
+		FadeLine = FString::Printf(
+			TEXT("\nFADE       S%d %.2f  |  DMI %d (%d fadeable)  |  readback %.2f-%.2f"),
+			DiagStation, DiagFade, MatCache.Num(), NFade,
+			(LoFade > 8.f ? -1.f : LoFade), (HiFade < -8.f ? -1.f : HiFade));
+	}
 	FString NanLine;
 	if (NaniteDiagStep != 0)
 	{
@@ -1773,10 +2051,10 @@ void AQZoomStagePawn::UpdateReadout()
 			NaniteNames[FMath::Clamp(NaniteDiagStep, 0, 2)], FLName, NaniteOn, ProxyMode);
 	}
 	Readout->SetText(FText::FromString(FString::Printf(
-		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s\nFILLERS    %s  [%s]%s%s%s"),
+		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s\nFILLERS    %s  [%s]%s%s%s%s"),
 		*FormatScale(ObserverSize), *FormatRate(ObserverSpeed), *FormatZoom(Power), ZoomProgress * 100.f,
 		PPNames[FMath::Clamp(PPPreset, 0, 9)], FillNames[FMath::Clamp(FillerMode, 0, 3)],
-		DensNames[FMath::Clamp(FillerDensity, 0, 4)], *PalLine, *NanLine, *FpsLine)));
+		DensNames[FMath::Clamp(FillerDensity, 0, 4)], *PalLine, *NanLine, *FpsLine, *FadeLine)));
 
 	// Drive the progress FILL: grows from the fixed left end (ReadoutBarLeft) toward the right.
 	if (ReadoutBarFill)
@@ -1982,13 +2260,15 @@ void AQZoomStagePawn::InitStageAudio()
 		}
 		StageAudio.Add(AC);   // keep index aligned with StageSounds (entry may be null)
 	}
-	UE_LOG(LogTemp, Log, TEXT("[QZoomStage] stage audio: %d continuous tracks (spatial=%d)"), StageAudio.Num(), (int)bSpatialAudio);
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] stage audio: %d continuous tracks (spatial=%d)"), StageAudio.Num(), (int)bSpatialAudio);
 }
 
 void AQZoomStagePawn::UpdateAudio()
 {
 	const int32 N = StageAudio.Num();
-	if (N == 0) return;
+	int32 Live = 0;
+	float Peak = 0.f;
+	if (N == 0) { AudioLive = 0; AudioPeak = 0.f; return; }
 	for (int32 i = 0; i < N; ++i)
 	{
 		if (!StageAudio[i]) continue;
@@ -1998,7 +2278,14 @@ void AQZoomStagePawn::UpdateAudio()
 		W = W * W * (3.f - 2.f * W);                                        // smoothstep
 		W = FMath::Max(W, AudioBed);                                        // continuous bed floor
 		StageAudio[i]->SetVolumeMultiplier(W * MasterVolume);
+		Peak = FMath::Max(Peak, W * MasterVolume);
+		if (StageAudio[i]->IsPlaying()) ++Live;
 	}
+	// Published to the readout. "Sound is gone" has several causes that look identical from the
+	// outside — no tracks spawned, tracks spawned but never playing, playing but faded to zero —
+	// and they need completely different fixes. These two numbers separate them at a glance.
+	AudioLive = Live;
+	AudioPeak = Peak;
 }
 
 void AQZoomStagePawn::ApplyPPPreset(int32 P)
@@ -2146,8 +2433,10 @@ void AQZoomStagePawn::InitFillers()
 	// rather than a separate layer, and it responds to the squeeze like everything else.
 	if (Motes) FillerMotesMID  = Motes->CreateDynamicMaterialInstance(0);
 	if (Worm)  FillerStructMID = Worm ->CreateDynamicMaterialInstance(0);
-	if (FillerMotesMID)  FillerMotesMID ->SetVectorParameterValue(TEXT("BaseColor"), FillerColorMotes);
-	if (FillerStructMID) FillerStructMID->SetVectorParameterValue(TEXT("BaseColor"), FillerColorStruct);
+	if (FillerMotesMID)  FillerMotesMID ->SetVectorParameterValue(TEXT("BaseColor"),
+		FillerColorMotes * FillerBrightness);
+	if (FillerStructMID) FillerStructMID->SetVectorParameterValue(TEXT("BaseColor"),
+		FillerColorStruct * FillerBrightness);
 	SetFillerMode(FillerMode);   // re-apply visibility (this runs on density rebuilds too)
 
 	// A/B re-run InitFillers to rebuild the cloud, which recreates these DMIs — so the material cache and the
@@ -2203,7 +2492,10 @@ void AQZoomStagePawn::UpdateFillers(float Dt)
 	// FillerScaleRatio of their rate (1.0 = exactly the world's rate; < 1 = the medium reads as "further out").
 	const float fs = FMath::Clamp(FMath::Exp((ZoomProgress - c2) * LocalK() * FillerScaleRatio),
 	                              FillerScaleMin, FillerScaleMax);
-	const FVector FScale(fs);
+	// Size and growth rate are two different things. fs is HOW FAST the medium tracks the zoom;
+	// FillerSizeScale is HOW BIG each instance is. They used to be one number, so making the
+	// medium follow the zoom properly also inflated it.
+	const FVector FScale(fs * FMath::Max(FillerSizeScale, 0.01f));
 	const bool bBand = presence > 0.005f;
 
 	// PROTEINS — gentle drift with a soft two-frequency wobble (alive, but unhurried).
