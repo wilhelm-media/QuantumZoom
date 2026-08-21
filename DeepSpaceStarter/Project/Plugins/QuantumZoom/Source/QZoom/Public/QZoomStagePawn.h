@@ -17,7 +17,54 @@ struct FQZHandover
 {
 	GENERATED_BODY()
 
-	/** Use this per-station override. Off = the station uses the global StationZoomK / MinVis / fade values. */
+	/** WHAT THIS STAGE IS. A label only — the ladder position is this row's INDEX in the array, and
+	 *  that index is the number in each actor's QZStation tag. Renaming is free. REORDERING IS NOT:
+	 *  it re-numbers everything below and the actors' tags would then point at the wrong stage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage") FName Name;
+
+	/** The sublevel that holds this stage's actors. Documentation, not streaming — it is here so the
+	 *  ladder reads as a map of the project instead of a column of anonymous numbers. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage") FName Level;
+
+	/** REAL-WORLD SIZE of the framed subject, in metres. This is what PLACES the stage on the ladder:
+	 *  with bLogSpacedStations on, the spacing is derived from these, so equal ZoomProgress means
+	 *  equal decades and the perceived zoom rate stays constant.
+	 *  0 = fall back to the legacy ScaleMeters array for this slot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage") float ScaleMeters = 0.f;
+
+	/** Off = this stage keeps its slot but NEVER renders. Retire a stage here rather than deleting the
+	 *  row — deleting renumbers every stage below it, and those numbers are baked into actor tags. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage") bool bActive = true;
+
+	/** HOW BIG THE CAMERA'S DISSOLVE BUBBLE IS FOR THIS STAGE. Multiplier on CamGateStartUU and
+	 *  CamGateRangeUU, which the pawn scales by the station's own size:
+	 *
+	 *      CamFadeStart = CamGateStartUU * StationScale * NearDissolve
+	 *
+	 *  THIS, NOT `Dissolve`, IS USUALLY WHAT MAKES A STAGE "VANISH TOO EARLY". Because the bubble
+	 *  grows with the station, a hero that has swollen to 7x is measured against a bubble that has
+	 *  also swollen 7x — at the lab that put the entire mushroom (6000 uu across) inside a fade band
+	 *  reaching 10500 uu, so it was being eaten from the inside out while its station fade said it
+	 *  was fully present. Raising `Dissolve` cannot help: the camera gate gets there first.
+	 *
+	 *  1.0 = the shared behaviour. LOWER = a tighter hole, so the stage survives closer to the lens
+	 *  and you fly INTO it rather than watching it evaporate ahead of you. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="0.01", ClampMax="4.0"))
+	float NearDissolve = 1.f;
+
+	/** HOW MUCH OF THE DEFAULT ENVIRONMENT THIS STAGE WANTS: the two QZGlobalLight directionals, the
+	 *  sky light, the sky atmosphere and the height fog, all together.
+	 *
+	 *  1 = the shared rig at full strength. 0 = only this stage's OWN lights illuminate it.
+	 *
+	 *  UpdateLights deliberately skips anything tagged QZGlobalLight, so before this existed the key
+	 *  and fill were on at full strength in every scene — which is why a set of lab point lights at
+	 *  intensity 8 could not be seen against a key at 3 plus a sky. The value cross-fades between
+	 *  stages weighted by their current fades, so it never snaps at a handover. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float GlobalLight = 1.f;
+
+	/** Use the timing values below. Off = the station uses the global StationZoomK / MinVis / fade values. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover") bool bEnabled = false;
 
 	/** TIMING — how steep this station's growth is. Higher = it stays a tiny dot longer, then blooms fast
@@ -35,10 +82,39 @@ struct FQZHandover
 	 *  lingers longer before dissolving. This is the per-station MaxVis (like the QZMaxVis tag). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="1.0")) float Dissolve = 35.f;
 
+	/**
+	 * How big this station RENDERS, as a multiple of its authored size. Purely a size knob: it does
+	 * NOT touch the fade windows.
+	 *
+	 * The distinction matters. StationScale() — exp((Progress - Centre) * K) — is the number the
+	 * whole ladder is built on: InitialSize, Dissolve, FadeIn and FadeOut are all thresholds
+	 * against it, and the drill, the lights and the fog read it too. Shifting a station's centre to
+	 * make it smaller would move all of those with it and re-time the leg. So the size multiplier
+	 * is applied where the geometry is actually placed and nowhere else: the station appears and
+	 * dissolves at exactly the same points on the zoom bar, it is simply smaller while it is there.
+	 *
+	 * Set it on a RUN of stations, not one: halving NirA alone would leave MET169 oversized inside
+	 * it. Halving NirA and everything after keeps every relative proportion and just makes the
+	 * back half of the dive less massive.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="0.05", ClampMax="20.0")) float SizeMul = 1.f;
+
 	/** FADE OUT — width of the DISSOLVE ramp, separate from FadeIn. These used to be one number, which is
 	 *  why lengthening the lab's dissolve also made it bloom in slowly: appearing and departing want very
 	 *  different durations. You arrive at a scene quickly and leave it slowly. 0 = follow FadeIn. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="0.0", ClampMax="6.0")) float FadeOut = 0.f;
+
+	/** LOOK — applied ONCE, when this stage takes over as the dominant station.
+	 *  -1 means "leave whatever is set", which is what every stage does by default: the look then
+	 *  simply carries forward from the last stage that had an opinion. So the lab can ask for
+	 *  neutral, the structure can ask for P5, and everything after it inherits P5 without each
+	 *  row having to repeat it.
+	 *  Manual D-Pad Up/Down and LB still work — they are overridden at the next handover, which
+	 *  is the behaviour a show wants: the operator can look around, and the piece pulls itself
+	 *  back onto the authored look at the next stage. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="-1", ClampMax="9")) int32 Preset = -1;
+	/** Style-light step to apply when this stage takes over. -1 = leave alone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover", meta=(ClampMin="-1")) int32 StyleStep = -1;
 };
 
 /**
@@ -129,6 +205,8 @@ class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class USoundBase;
 class UAudioComponent;
+class UPointLightComponent;   // the CH4 energy light lives on the pawn
+class UExponentialHeightFogComponent;   // the shared environment rig, scaled per stage
 class APostProcessVolume;
 class ULightComponent;
 class UHeterogeneousVolumeComponent;
@@ -201,10 +279,26 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel")
 	TArray<float> StationZoomK;
 
-	/** SIMPLIFIED per-station handover tuning (item 4): timing / initial resize / fade-in / dissolve, one
-	 *  entry per station. An entry with bEnabled=true overrides the scattered globals for that station.
-	 *  Index-aligned to the stations (0=Lab .. 5=Quarks). Empty/disabled = old global behaviour. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Handover")
+	/** ═══ THE LADDER. ONE ROW PER STAGE, AND THE ONLY PLACE TIMING IS AUTHORED. ═══
+	 *
+	 *  Everything that decides WHERE a stage sits and HOW it hands over now lives on its own named
+	 *  row: the name, the level that holds it, its real-world size, its steepness and its two fade
+	 *  widths. Open this one array and the whole descent is in front of you, in order.
+	 *
+	 *  It replaces four parallel arrays that had to be kept index-aligned by hand — ScaleMeters,
+	 *  StationZoomK, Handover and the QZMaxVis tags scattered across actors in eight sublevels. None
+	 *  of those carried a name, so row 5 meant nothing until you counted.
+	 *
+	 *  HOW TO USE IT
+	 *    - the stage's position on the ladder comes from ScaleMeters (real metres), not its index
+	 *    - Name and Level are labels; they cost nothing and make the array readable
+	 *    - bActive off retires a stage without deleting the row
+	 *    - bEnabled off ignores this row's timing and falls back to the globals
+	 *
+	 *  THE ONE RULE: the row's INDEX is the number in each actor's QZStation tag. Renaming a row is
+	 *  free. Reordering or deleting one re-numbers everything below it and silently re-points those
+	 *  tags at the wrong stage. Retire with bActive instead. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Ladder")
 	TArray<FQZHandover> Handover;
 
 	/** Global multiplier on every station's effective K — the single "zoom intensity" dial, on top of whatever
@@ -314,6 +408,129 @@ public:
 	 *  events. Both still dock on the same site, which is correct — they act on the same residue. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.0", ClampMax="180.0"))
 	float CH4MsraApproachDeg = 60.f;
+
+	// ── Presence: when each enzyme is ON SCREEN, as fractions of the cycle ────────────────
+	// These were hard-coded (0.20/0.80 and 0.622/1.00 with a 0.06 ramp) and the ramp was far too
+	// short — the enzymes reached full opacity in 6% of the cycle while still at their far
+	// distance, which is a pop with a fade in front of it. They are properties now so the
+	// sequence and the visibility can be re-timed together without a rebuild.
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.0", ClampMax="1.0")) float CH4FmobIn  = 0.030f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.0", ClampMax="1.0")) float CH4FmobOut = 0.660f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.0", ClampMax="1.0")) float CH4MsraIn  = 0.550f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.0", ClampMax="1.0")) float CH4MsraOut = 0.995f;
+	/** Ramp length at each end of those windows. Long: they arrive out of the distance. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.01", ClampMax="0.45"))
+	float CH4PresenceRamp = 0.150f;
+
+	/** The two moments the reaction turns over: oxygen lands, and oxygen leaves. The energy layer
+	 *  reads its whole state from these, so they are the single place the beats are defined. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.0", ClampMax="1.0")) float CH4DockPhase    = 0.360f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Beats", meta=(ClampMin="0.0", ClampMax="1.0")) float CH4ReleasePhase = 0.860f;
+
+	/** Leave the enzymes to the LADDER while the cycle is stopped. UpdateCH4Cycle writes
+	 *  StationFade a second time, after ApplyStations, as StationFade * Presence(phase) — and at
+	 *  phase 0 Presence is exactly 0, so a stopped cycle force-hid both enzymes every frame no
+	 *  matter what the ladder said. Two writers, one parameter. With this on, a stopped cycle
+	 *  stops writing at all and the ladder's value survives.
+	 *
+	 *  DEFAULT BACK TO FALSE — turning this on was my mistake. The double write is real, but the
+	 *  OUTCOME it produced was the right one: a stopped cycle should HIDE the enzymes. With it on
+	 *  they instead inherit station 4's ladder fade and sit at their authored local offsets
+	 *  (~120,000 uu), so as MET169 blows up through the handover to nucleus they scale outward
+	 *  and sweep past the lens — "a strange copy of MET169 floating towards the camera". Leave it
+	 *  off unless you specifically want the enzymes parked visible with the clock stopped. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4") bool bCH4HoldWhenStopped = false;
+
+	// ── The energy layer: activation and deactivation, not a generic sparkle ──────────────
+	// One shell of radial shards around the residue, driven entirely by the two beats above.
+	// DEACTIVATION is an IMPLOSION: the shell rushes inward, the shards shorten, the colour
+	// falls to cold. ACTIVATION is the reverse and louder — an outward shock that overshoots
+	// before settling. Between the two the shell simply breathes, dim while deactivated and
+	// bright while active, so the state is readable at any moment and not only at the turnover.
+	// Built as an ISM on the pawn rather than Niagara, because that is what this project can
+	// author end to end without a published parameter set.
+	// OFF by default — Michael's call after seeing it at MET169. The system stays in the build so
+	// it can be switched back on per-pawn without a rebuild; nothing runs while this is false.
+	// ── Niagara user parameters, published to every emitter alongside StationFade ───────────
+	// The sulfur system exposes two size handles rather than one, because its emitters are not
+	// all the same kind of thing: four are the particles proper and one is a background glow
+	// that has to be far larger to read at all. One shared number cannot serve both — at the
+	// value that makes the glow visible the particles are absurd, and vice versa. The defaults
+	// are the values Michael tuned in the Niagara editor, not guesses.
+	/** User.ParticleScale — drives the four particle emitters. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Niagara", meta=(ClampMin="0.0", ClampMax="200")) float ParticleScale = 1.f;
+	/** User.ParticleGlowScale — the background glow emitter, which needs to be much larger. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Niagara", meta=(ClampMin="0.0", ClampMax="500")) float ParticleGlowScale = 40.f;
+	/**
+	 * User.ParticleColor — the emitters' tint, published like the two sizes.
+	 *
+	 * It is a LADDER value rather than an emitter setting because the look it has to survive is a
+	 * ladder value. P5 Infrared sets SceneColorTint to (0.40, 0.02, 0.02): a straight per-channel
+	 * multiply that leaves 2% of green and 40% of red. Add exposure -1.2 and contrast 1.60 on top
+	 * and a green particle keeps under 1% of itself, while the same particle in red keeps 17% —
+	 * twenty times more, for no change to the preset and no extra brightness anywhere.
+	 *
+	 * Amber rather than pure red so it still reads as its own colour under the neutral presets
+	 * instead of vanishing into P2's crimson wash. Under an infrared look this is also the honest
+	 * reading: emission from the sulfur shows as heat, not as green.
+	 */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Niagara") FLinearColor ParticleColor = FLinearColor(1.0f, 0.45f, 0.10f, 1.f);
+	// The emitter is parented to the sulfur lobe, so it ALREADY inherits the station's scale
+	// through the component transform — multiplying the published sizes by the scale again would
+	// apply it twice and the cloud would grow as the square. Left off; turn it on only if the
+	// particles are found not to follow the zoom, which would mean the emitters are world-space.
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Niagara") bool bParticleScaleTracksZoom = false;
+
+	// ══ THE QUARK TRIAD ═══════════════════════════════════════════════════════════════════
+	// Three valence quarks that wander independently, and three gluon strings that ANSWER to
+	// where they went.
+	//
+	// This cannot be done in a material, and it is worth being clear why, because the previous
+	// version tried. A material moves vertices; it has no way to tell a beam where the sphere at
+	// its far end has drifted to. So the spheres could only pulse in place, and the strings could
+	// only writhe between two points that never moved — which is decoration, not the physics.
+	// Rebuilding each string from the two quark positions every frame is the whole point, and
+	// that has to happen here.
+	//
+	// WHAT THE MOTION IS SAYING
+	// Quarks are never at rest and never alone. Each one wanders on its own three incommensurable
+	// frequencies, so the triad never repeats and never reads as a mechanism. The strings stretch
+	// to follow, and — this is the part that carries the story — a stretched string gets BRIGHTER
+	// and more violent, not weaker. That is colour confinement: unlike every other force, the
+	// gluon field does not fall off with distance, it builds. Pull two quarks apart and the string
+	// between them stores more energy until it would rather make new particles than let go. So a
+	// quark drifting outward is visibly punished for it, and nothing ever escapes the hull.
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks") bool bQuarkMotion = true;
+	/** Ladder row the triad belongs to; the motion only runs while that station is on screen. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks") int32 QuarkStation = 7;
+	/** How far a quark strays, as a fraction of its own rest radius. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="1.0")) float QuarkWander = 0.42f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="4.0")) float QuarkSpeed = 0.5f;
+	/** Extra brightness per unit of stretch: 0 = a dumb line, high = confinement made obvious. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="6.0")) float GluonTension = 2.4f;
+	/** String thickness, in the beam mesh's own local units. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.005", ClampMax="1.0")) float GluonThickness = 0.075f;
+	float QuarkClock = 0.f;
+	/** Authored rest positions, captured the first frame each quark is seen. */
+	TArray<FVector> QuarkHome;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy") bool bCH4Energy = false;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0", ClampMax="4000")) int32 CH4EnergyCount = 900;
+	/** Shell radius at rest, as a fraction of the station span (3464 uu at scale 1). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.02", ClampMax="3.0")) float CH4EnergyRadius = 0.42f;
+	/** How far the shock overshoots the resting shell at the peak of a turnover. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.0", ClampMax="4.0")) float CH4EnergyBurst = 1.35f;
+	/** Width of a turnover, in cycle fractions. Small = a crack, large = a swell. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.005", ClampMax="0.30")) float CH4EnergyBurstWidth = 0.055f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.0001", ClampMax="0.2")) float CH4EnergyThickness = 0.012f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.0", ClampMax="40.0")) float CH4EnergyBrightness = 7.0f;
+	/** Idle drift of the shell, revolutions per cycle — the shell is never quite still. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.0", ClampMax="6.0")) float CH4EnergySwirl = 0.65f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy") FLinearColor CH4EnergyHot  = FLinearColor(1.00f, 0.74f, 0.28f, 1.f);
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy") FLinearColor CH4EnergyCold = FLinearColor(0.16f, 0.34f, 0.78f, 1.f);
+	/** A light on the same envelope, so the energy shift lands on the surrounding geometry too
+	 *  and not only as an overlay. 0 disables it. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4|Energy", meta=(ClampMin="0.0")) float CH4EnergyLightIntensity = 9000.f;
 
 	/** REFERENCE PARTICLES — a scale reference, not decoration.
 	 *
@@ -566,12 +783,31 @@ public:
 	// and it is carried by a mote field, not by an asset.
 	TArray<float> ScaleMeters = {0.09f, 3e-4f, 3e-6f, 1e-8f, 2e-10f, 1e-10f,
 	                             8.42e-15f, 1.68e-15f, 3.0e-16f};
-	/** Camera-relative (forward, right, up). Negative right = LEFT; positive up keeps it high on the
-	 *  WALL and out of the floor frustum. Default = top-left of the wall. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
-	FVector ReadoutOffset = FVector(900.f, -650.f, 520.f);
+	/** Camera-relative (forward, right, up) of the LEFT column. DERIVED from the Interface numbers
+	 *  below — shown here because it is what the component actually receives. */
+	UPROPERTY(VisibleAnywhere, Category="QZoomStage|Readout")
+	FVector ReadoutOffset = FVector(950.f, -820.f, 560.f);
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
 	float ReadoutSize = 26.f;
+
+	// ── Interface placement: ONE control surface for BOTH columns ─────────────
+	// The left readout and the right caption are a PAIR, and they had drifted apart into two
+	// independently authored offsets: forward 900 vs 950 (two different stereo planes, two
+	// different apparent sizes) and up 520 vs 220 (300 uu apart vertically). That is why only
+	// one of them ever read as sitting in a corner — the other was never near one.
+	// Three numbers now place both, mirrored about the view centre, and they are re-applied
+	// every frame so they can be tuned live in PIE instead of only at BeginPlay.
+	/** Camera-forward depth of both columns. One depth = one stereo plane for the whole interface. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Interface", meta=(ClampMin="200.0"))
+	float UIDepth = 950.f;
+	/** View centre -> each column's OUTER edge, in uu at UIDepth. THE knob for "further into the
+	 *  corner": raise it until the text sits where you want against the bezel. The wall frustum is
+	 *  the cluster's, not this camera's, so there is no safe number to compute — it is judged by eye. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Interface", meta=(ClampMin="0.0"))
+	float UIMarginRight = 820.f;
+	/** View centre -> the TOP line of both columns, in uu at UIDepth. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Interface", meta=(ClampMin="0.0"))
+	float UIMarginUp = 560.f;
 
 	/** Always-on-top unlit text material (M_ReadoutText). Auto-loaded if empty; used for readout + detail. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
@@ -595,18 +831,69 @@ public:
 	/** Reference real-world pace (m/s) the observer keeps as it shrinks — source of the relative-speed blow-up. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Observer", meta=(ClampMin="0.0")) float ObserverRefSpeed = 0.10f;
 
-	// ── Info layer (fixed in view, fades in per stage, decoupled from the scaling geometry) ──
+	// ── Scene caption (upper right): what you are looking at, in the ladder's own words ──────
+	// INDEX-ALIGNED TO THE LADDER, one entry per station. SyncLadder resizes all four to
+	// StationCount so a ladder edit can never leave a caption pointing at a station that has
+	// been retired — that misalignment is exactly what made the captions describe the wrong
+	// stage once the ladder grew from six entries to eight.
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") TArray<FString> StageTitle;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") TArray<FString> StageSub;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") TArray<FString> StageScaleLabel;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") TArray<FString> StageProv;
 
-	/** Camera-relative anchor of the detail block (forward, right, up) — FIXED; never moves with geometry. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") FVector DetailOffset = FVector(950.f, 480.f, 220.f);
+	/** Camera-relative anchor of the caption (forward, right, up). DERIVED from the Interface
+	 *  numbers — mirror of ReadoutOffset. */
+	UPROPERTY(VisibleAnywhere, Category="QZoomStage|Info") FVector DetailOffset = FVector(950.f, 820.f, 560.f);
+	/** Base type size of the caption. Every line is a multiple of it, so this one number scales
+	 *  the whole block and keeps the hierarchy intact. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") float DetailSize = 34.f;
-	/** Half-width in ZoomProgress of the fade window around each stage centre. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Info", meta=(ClampMin="0.02", ClampMax="0.5"))
-	float InfoFadeWidth = 0.09f;
+	/** "04 / 08" above the title — where you are on the ladder. Nothing else on screen says this. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") bool bShowStationIndex = true;
+
+	/** Let the ladder drive the look: apply each stage's Preset / StyleStep at its handover.
+	 *  Off = presets and the style light are manual only, as they were. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Info") bool bAutoStagePreset = true;
+
+	// ── The grade, BLENDED IN rather than switched ────────────────────────────────────────
+	// A per-stage preset is a step: at the handover the whole frame changes grade in one frame.
+	// Blending is better here and simpler — APostProcessVolume already has BlendWeight, which
+	// is exactly "how much of this volume applies". Hold the preset's settings on the volume
+	// permanently and ramp the WEIGHT from 0 to 1 across a zoom range: 0 is untouched scene,
+	// 1 is the full preset, and everything between is the engine's own interpolation. No
+	// per-field lerp to write and nothing to keep in sync when a preset is edited.
+	//
+	// It also fixes the fragility of the per-stage route: BlendWeight is derived from
+	// ZoomProgress, which is already synced to every node, so each node computes the same
+	// number locally. Nothing to broadcast, and no primary-only path to fail quietly.
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bPresetBlend = true;
+	/** Which preset the blend targets. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0", ClampMax="9")) int32 PresetBlendPreset = 5;
+	/** Neutral below Start, full preset at End. Both are ZoomProgress, 0..1. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0")) float PresetBlendStart = 0.08f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0")) float PresetBlendEnd = 0.15f;
+	int32 PresetBlendApplied = -1;   // last PresetBlendPreset pushed onto PPPreset
+
+	/** The style light stays OFF below this depth, whatever step LB is on. The mushroom is lit
+	 *  by its own rig and the style light only muddies it; this makes "off until the structure"
+	 *  a property of the piece rather than something the operator has to remember. LB still
+	 *  cycles below the threshold — the step is remembered, it just is not applied yet. */
+	// ── HUD exemption from the grade ─────────────────────────────────────────────────────
+	// The readout is world-space geometry, so the tonemapper grades it with the scene. P5's
+	// SceneColorTint (0.40, 0.02, 0.02) is a MULTIPLY: white text lands near (0.18, 0.01, 0.01)
+	// and no colour choice survives it. M_ReadoutText has no parameters to drive above white
+	// either — verified, zero scalars and zero vectors.
+	// So the HUD writes CUSTOM STENCIL, and M_PP_HUD runs AFTER the tonemapper and re-draws
+	// those pixels at their authored colour. Post-tonemap is the only place a grade cannot
+	// reach, which is why this is the fix and brightness tricks are not.
+	// Cost, stated: CustomStencil is one bit per pixel, so glyph edges lose antialiasing and go
+	// hard. HUDRestoreSoft below 1 blends back toward the graded pixel — softer, less immune.
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bHUDExemptFromPP = true;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="1", ClampMax="255")) int32 HUDStencil = 7;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") TObjectPtr<UMaterialInterface> HUDPostMaterial;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> HUDPostMID;
+
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bStyleLightZoomGate = true;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0")) float StyleLightZoomOn = 0.13f;
 
 	// ── Info BACKGROUND (separate depth layer → tunable stereo pop) ────────────
 	// Editorial layout default: OFF (no boxes — hairline rules carry the structure). Flip on for the panelled look.
@@ -661,6 +948,38 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks") TObjectPtr<UStaticMesh> StreakMesh;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks") TObjectPtr<UMaterialInterface> StreakMaterial;
 
+	/** Lateral drag on the star field per deg/s of orbit — the medium gets swept when you swing.
+	 *  0 restores the old behaviour, where the field ignored orbit completely. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks", meta=(ClampMin="0.0", ClampMax="40.0"))
+	float StreakOrbitShear = 6.0f;
+	/** Orbit rate (deg/s) that counts as a full-speed swing for the boost below. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks", meta=(ClampMin="5.0", ClampMax="360.0"))
+	float StreakOrbitFull = 80.f;
+	/** Peak streak intensity an orbit can produce on its own, with the zoom completely still.
+	 *  Kept below 1 on purpose: orbiting is a look-around, not a descent, and it should not read
+	 *  as loudly as the zoom does. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float StreakOrbitBoost = 0.5f;
+
+	/** Pieces each streak is built from. A streak is a chain of cubes, and a chain is the only way
+	 *  it can bend: the mesh is /Engine/BasicShapes/Cube, which has EIGHT vertices, so no amount of
+	 *  vertex offset in the material can curve a single instance — it would only shear the box.
+	 *  1 = a straight segment. 6-10 reads as a smooth ribbon.
+	 *  CHANGING THIS NEEDS A RESTART: the instances are allocated once in InitStreaks. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks", meta=(ClampMin="1", ClampMax="16"))
+	int32 StreakSegments = 8;
+	/** How many past positions each star remembers. THE TRAIL IS THIS HISTORY — the shape is not
+	 *  computed from the current orbit rate, it is where the particle actually went.
+	 *  That distinction is the whole point: an analytic bow re-bends every streak at once the moment
+	 *  the orbit direction changes, which reads as the entire field flexing in sync. A remembered
+	 *  path cannot do that. The old tail keeps the shape it was drawn with and only the newest
+	 *  samples follow the new direction, so a direction change travels DOWN the ribbon as an S — the
+	 *  way a real trail behaves.
+	 *  More history = a longer possible trail at low speed. Costs 12 bytes per star per entry.
+	 *  CHANGING THIS NEEDS A RESTART. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Streaks", meta=(ClampMin="4", ClampMax="128"))
+	int32 StreakHistory = 32;
+
 	// ── Stage soundscape ─────────────────────────────────────────────────────
 	// One looping track per stage, index-aligned to the stations. Every track plays CONTINUOUSLY from
 	// BeginPlay (never re-triggered — that was the unreliable part); only VOLUME is cross-faded by zoom.
@@ -690,11 +1009,16 @@ private:
 	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailSub = nullptr;
 	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailScale = nullptr;
 	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailProv = nullptr;
+	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailIndex = nullptr;   // "04 / 08"
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> Streaks = nullptr;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> StreakMID = nullptr;
 	float StreakIntensitySmoothed = 0.f;   // time-smoothed for a gentle fade in/out
-	float StreakDir = 1.f;                 // LATCHED flow sign; holds through the fade so a stop retracts to ONE end (not the raw sign(VisVel) which snaps to 0 on release and re-centres the streak)
+	float OrbitYawRate = 0.f, OrbitPitchRate = 0.f;   // deg/s, measured per frame; drives both the lateral shear and the orbit contribution to intensity
+	float PrevOrbitYaw = 0.f, PrevOrbitPitch = 0.f;
 	TArray<FVector> StarPos;               // star positions (decoupled from the rendered, anchored cube)
+	TArray<FVector> StarHist;              // ring buffer of past positions, star k at [k*StarHistLen ..). The trail is drawn through these, so its shape IS the path travelled.
+	int32 StarHistLen = 0;                 // entries per star (0 until InitStreaks runs)
+	int32 StarHistHead = 0;                // newest slot; shared by all stars since they all advance together
 	UPROPERTY() TObjectPtr<UStaticMeshComponent> ReadoutBG = nullptr;
 	UPROPERTY() TObjectPtr<UStaticMeshComponent> DetailBG = nullptr;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> ReadoutBGMID = nullptr;
@@ -748,8 +1072,25 @@ private:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers") FLinearColor FillerColorMotes  = FLinearColor(0.30f, 0.52f, 0.90f);
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers") FLinearColor FillerColorStruct = FLinearColor(0.90f, 0.62f, 0.18f);
 
-	// ── Scientific space fillers: cycle with F (0 off / 1 motes / 2 grid / 3 structures) ──
-	int32 FillerMode = 3;   // default: full medium (proteins + enzymes), scale-gated to the molecular band
+	/** The spherical protein globules — the "motes" half of the medium. OFF: they read as floating
+	 *  balls rather than as a medium, and the enzyme-worms carry the depth cue on their own.
+	 *  Turning this off skips BUILDING them as well as drawing them, so the instances are not
+	 *  allocated at all — it is a saving, not just a hidden component. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers") bool bFillerMotes = false;
+
+	/** THE MEDIUM'S MASTER SWITCH. 0 off / 1 motes / 2 grid (retired) / 3 motes + structures.
+	 *  Cycled at runtime with F, and now editable here — it was previously a plain member with no
+	 *  UPROPERTY, so the only way to turn the medium off was to press a key every run.
+	 *
+	 *  BOTH HALVES ARE SPHERES. The "structures" are enzyme-worms built as chains of 24 beads from
+	 *  /Engine/BasicShapes/Sphere — the same mesh as the motes. So switching bFillerMotes off removes
+	 *  the globule clouds and leaves just as many balls on screen, which is why the motes kept
+	 *  appearing to come back. Set this to 0 to remove the medium entirely. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0", ClampMax="3"))
+	int32 FillerMode = 3;
+
+	/** The enzyme-worms. Same note as bFillerMotes: these are bead chains of spheres, not filaments. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers") bool bFillerStruct = true;
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> FillerMotes = nullptr;
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> FillerGrid = nullptr;
 	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> FillerStruct = nullptr;
@@ -758,7 +1099,21 @@ private:
 	float FillerSwirl = 0.f;    // accumulated self-rotation of the filler clouds (deg), on top of the orbit
 	int32 FillerDensity = 1;    // index into the density table (0 sparse .. 4 EXTREME); A/B step it
 	bool bUpPrev = false, bDownPrev = false, bLeftPrev = false, bRightPrev = false;   // D-Pad rising-edge latches
-	bool bLBPrev = false, bRBPrev = false;                                            // LB/RB style-light latches
+	bool bLBPrev = false, bRBPrev = false;   // LB = style-light cycle, RB = reaction tap/hold
+
+public:
+	/** How long RB may be held and still count as a TAP. Above it the press is a hold and ramps
+	 *  the reaction to CH4SpeedMax instead of toggling. Generous on purpose — a decisive tap is
+	 *  well under 0.35 s, and a hold is not a gesture anyone performs by accident. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.05", ClampMax="1.5"))
+	float CH4HoldToTap = 0.35f;
+	/** Is the reaction running? Toggled by an RB tap; also settable here for a fixed show. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	bool bCH4Running = false;
+
+private:
+	float CH4HoldT = 0.f;        // how long RB has been down this press
+	float CH4SpeedNow = 1.f;     // eased speed multiplier: 1 normally, CH4SpeedMax while held
 	bool bAPrev  = false, bBPrev  = false;                                            // A/B density latches
 	int32 NiraVersion = 1;   // S2 NirA representation: 0 high-res FBX / 1 low-res FBX (default) / 2 procedural / 3 hull
 	/** How many NirA versions X cycles through. Bump to 4 for the tight-hull variant (QZVer3). */
@@ -832,8 +1187,35 @@ private:
 
 	// Per-frame light fade: each station sublevel's lights fade with that station's visibility (no pop-in).
 	TMap<ULevel*, float> LevelFade;                                   // rebuilt each frame in ApplyStations
+	TMap<ULevel*, int32> LevelStationIdx;                             // which station owns each sublevel — lets a level-bound light use that station's SCALE, not just its fade
 	TSet<ULevel*> TrackedLevels;                                      // every station sublevel ever seen (persistent)
 	TMap<TWeakObjectPtr<ULightComponent>, float> LightBaseIntensity;  // captured base intensity, persistent
+	/** A station light has to RIDE its station. The pawn scales the world about the Anchor, but a light
+	 *  keeps whatever world position and attenuation radius it was authored with — so as the hero grows
+	 *  the light illuminates a fixed sphere of space that the geometry sweeps through, which reads as
+	 *  lighting that only works from certain angles. Both are captured once, relative to the Anchor, and
+	 *  re-applied each frame scaled by the station. */
+	TMap<TWeakObjectPtr<ULightComponent>, FVector> LightBaseOffset;   // authored position, relative to the Anchor
+	TMap<TWeakObjectPtr<ULightComponent>, float>   LightBaseRadius;   // authored attenuation radius
+
+public:
+	/** KEEPS THE LOOK CONSTANT AS THE WORLD GROWS. A point light obeys inverse-square falloff, so
+	 *  once its offset and attenuation both scale by S, the illuminance at the (also scaled)
+	 *  surface falls by S^2 — the scene you art-directed at scale 1 goes progressively darker as
+	 *  you descend, without any setting having changed.
+	 *
+	 *  Intensity is multiplied by S raised to this power to cancel that.
+	 *      2 = physically exact: the lighting looks identical at every depth.
+	 *      0 = no compensation (what it did before this existed).
+	 *      between = a deliberate darkening or brightening with depth, if you want one. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Lights", meta=(ClampMin="0.0", ClampMax="3.0"))
+	float LightScalePower = 2.f;
+	/** Ceiling on that multiplier, so a station at 1500x cannot ask for an intensity that blows
+	 *  the whole frame out through bloom before its own fade has taken it away. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Lights", meta=(ClampMin="1.0"))
+	float LightScaleMaxMul = 250000.f;
+
+private:
 	TMap<TWeakObjectPtr<AActor>, float> PPBaseWeight;                 // PostProcessVolume base BlendWeight, persistent
 	TMap<TWeakObjectPtr<ULightComponent>, float> LightFadeSmoothed;  // per-light eased fade (prolongs the ramp)
 	TMap<TWeakObjectPtr<AActor>, float> PPFadeSmoothed;              // per-PP eased fade
@@ -922,7 +1304,10 @@ private:
 	void    Broadcast();              // primary -> all nodes
 	void    OnClusterEvent(const FDisplayClusterClusterEventJson& E);
 	void    ApplyStations();          // scale/hide/orbit the tagged station heroes (every node)
-	void    SetStationFade(AActor* A, float Fade);   // push StationFade onto an actor's materials
+	/** Push StationFade onto an actor's materials. GateMul scales the camera-dissolve bubble for this
+	 *  stage only (FQZHandover::NearDissolve) — 1 keeps the shared behaviour. */
+	void    SetStationFade(AActor* A, float Fade, float GateMul = 1.f);
+	void    UpdateQuarkTriad(float Dt);              // wandering valence quarks + gluon strings that follow
 	void    UpdateCH4Cycle(float Dt);                // looping redox cycle at the NirA station
 	float   CH4Phase = 0.f;                          // 0..1, wraps forever
 	FVector TunnelAxis = FVector::ForwardVector;     // camera -> anchor, world space, shared by every viewport
@@ -963,6 +1348,16 @@ private:
 	float DiagFade = 0.f;
 
 	void    UpdateRefParticles();                    // self-similar scale-reference field
+	/** The activation/deactivation shell. Driven only by CH4Phase against CH4DockPhase /
+	 *  CH4ReleasePhase, so re-timing the sequence re-times the energy with it. */
+	void    UpdateCH4Energy(float Dt);
+	UPROPERTY() TObjectPtr<UInstancedStaticMeshComponent> CH4EnergyISM = nullptr;
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic>      CH4EnergyMID = nullptr;
+	UPROPERTY() TObjectPtr<UPointLightComponent>          CH4EnergyLight = nullptr;
+	TArray<FVector> CH4EnergyDir;      // unit direction per shard, generated once
+	TArray<float>   CH4EnergyJitter;   // per-shard radius scatter, so the shell has thickness
+	TArray<float>   CH4EnergyPhase;    // per-shard shimmer offset
+	float           CH4EnergyClock = 0.f;
 	/** Fade any actor tagged QZFade<N> with station N — visibility + StationFade on its materials,
 	 *  WITHOUT moving or scaling it. Lights already had a level-independent route (QZLight<N>);
 	 *  meshes, volumes and effects had none, so an environment asset dropped into a station
@@ -987,7 +1382,17 @@ private:
 	TArray<float>   RefOffsets;                      // per-mote phase offset, generated once
 	TArray<float>   RefSizeJitter;
 	void    UpdateReadout();
-	void    UpdateInfoLayer();         // fixed per-stage detail text, faded by proximity to a stage centre
+	void    UpdateInfoLayer();         // the caption, driven by whichever station is actually on screen
+	/** Apply FQZHandover::Preset / StyleStep when the dominant station changes. Primary only:
+	 *  PPPreset and StyleLightStep are already broadcast to the other nodes, so letting every
+	 *  node decide for itself would mean two sources of truth for the same value. */
+	void    UpdateStagePresets();
+	int32   AutoStagePrev = -2;        // last dominant station acted on; -2 = nothing yet
+	/** Place both interface columns from UIDepth/UIMarginRight/UIMarginUp. Cheap and idempotent: it
+	 *  early-outs unless one of the three changed, so it can run every frame and the numbers can be
+	 *  dragged live in the Details panel during PIE. */
+	void    LayoutInterface();
+	float   UILaidDepth = -1.f, UILaidRight = -1.f, UILaidUp = -1.f;   // last applied triple
 	void    InitStreaks();
 	void    UpdateStreaks(float Dt, float Vel, float Intensity);   // speed particles, 0..1 intensity
 	void    InitStageAudio();     // primary/PIE only: spawn one continuous looping source per stage track
@@ -1014,6 +1419,57 @@ private:
 	void    ApplyNiraShells();           // show/hide SM_S2_NirA's enclosing ribbon+VOLUME surfaces
 	void    ApplyPalette();              // squeeze every station colour toward the nearest hue pole
 	float   StationScale(int32 N) const;
+	/** Station N's authored size multiplier (Handover[N].SizeMul), 1 where no row is enabled. */
+	float   StationSizeMul(int32 N) const;
+	/**
+	 * The scale the station is actually DRAWN at: StationScale(N) * StationSizeMul(N).
+	 * Everything that positions or measures geometry uses this — the station transform, the drill
+	 * bubble, light offsets and attenuation, the CH4 shell. Everything that decides WHEN a station
+	 * is on screen keeps using StationScale, so a size change never re-times the ladder.
+	 */
+	float   StationRenderScale(int32 N) const;
+	/** Make the derived ladder agree with the authored one. Fills StationCount and ScaleMeters from the
+	 *  Handover rows, so those two stop being things anyone has to keep in sync by hand. Rows that leave
+	 *  ScaleMeters at 0 keep whatever the legacy array had, which is what makes this safe to add to a
+	 *  pawn that was already tuned. */
+	/** Scale the shared environment rig by the stages currently on screen (FQZHandover::GlobalLight).
+	 *  Authored intensities are captured once and everything is driven as a multiple of those, so
+	 *  repeated frames cannot ratchet a value down to nothing. */
+	void    UpdateGlobalEnv();
+	TMap<TWeakObjectPtr<ULightComponent>, float> EnvBaseIntensity;   // authored values, captured once
+	TMap<TWeakObjectPtr<UExponentialHeightFogComponent>, float> EnvBaseFog;
+	float   EnvMul = 1.f;                  // smoothed, so a handover does not step the lighting
+	float   FogScaleSmoothed = -1.f;       // ditto for the fog; -1 = not yet seeded
+
+public:
+	/** FOG IS MEASURED IN WORLD UNITS AND THE WORLD SCALES BY exp().
+	 *  DepthFog is authored at FogDensity 1.0 — fifty times UE's default 0.02 — with
+	 *  StartDistance 0 and MaxOpacity 1. That is the teal the whole piece sits in, and it is
+	 *  correct at StationScale 1. But ApplyStations scales the world: the NirA station renders
+	 *  at x15 around 56% and MET169 at x80 by 70%, so geometry that sat 1,000 uu away is
+	 *  suddenly 80,000 uu away and far past fog saturation. The frame flattens to one hue —
+	 *  and a flat frame is one a colour grade cannot act on, which is exactly why the presets
+	 *  read as working on some stages and not others.
+	 *
+	 *  Nothing compensated for this: UpdateGlobalEnv only multiplied density by EnvMul, which
+	 *  is permanently 1.0 because every Handover row leaves GlobalLight at 1.
+	 *
+	 *  Dividing density by the dominant station's scale keeps the fog DEPTH constant in
+	 *  perceived terms — the same correction the camera-dissolve bubble already gets, and for
+	 *  the same reason: "near" has to keep meaning the same fraction of whatever you are inside.
+	 *  Turn this off to get the old behaviour back in one click. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Env")
+	bool bFogTracksScale = true;
+	/** Bounds on that correction, as multiples of the authored density. Without them a station
+	 *  at x1e5 would divide the fog to nothing and one at x0.01 would make it opaque. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Env", meta=(ClampMin="0.001", ClampMax="1.0"))
+	float FogScaleMin = 0.02f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Env", meta=(ClampMin="1.0", ClampMax="100.0"))
+	float FogScaleMax = 4.0f;
+
+private:
+
+	void    SyncLadder();
 	float   StageCentre(int32 N) const;   // ZoomProgress centre of stage N, incl. the ZoomLeadIn shift
 	float   StationK(int32 N) const;      // per-station ZoomK (StationZoomK[N] or ZoomK) * ZoomIntensity
 	float   LocalK() const;               // K at the CURRENT depth, blended across the leg — for the fillers
