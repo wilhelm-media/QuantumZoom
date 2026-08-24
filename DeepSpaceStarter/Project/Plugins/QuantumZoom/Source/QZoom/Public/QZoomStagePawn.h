@@ -812,6 +812,16 @@ public:
 	/** Always-on-top unlit text material (M_ReadoutText). Auto-loaded if empty; used for readout + detail. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
 	TObjectPtr<UMaterialInterface> ReadoutMaterial;
+	/** The readout texts render through ONE dynamic instance of M_ReadoutText so ApplyPPPreset can
+	 *  drive its GradeComp parameter — the text's emissive is pre-divided by the preset's tint and
+	 *  exposure, so the grade lands it back near its authored colour. Same mechanism the HDR
+	 *  particles use to survive P5; replaces the stencil/blendable restore, which proved unreliable
+	 *  on the nDisplay viewports. */
+	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> TextMID;
+	/** Ceiling for the per-channel compensation. Higher = truer colour under crushing presets but
+	 *  more bloom halo around the glyphs (bloom sees the HDR value); lower = calmer, greyer text. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="1.0", ClampMax="1000.0"))
+	float TextCompMax = 400.f;
 
 	/** Text colour for the whole zoom interface (readout + detail). Default white. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
@@ -887,7 +897,13 @@ public:
 	// reach, which is why this is the fix and brightness tricks are not.
 	// Cost, stated: CustomStencil is one bit per pixel, so glyph edges lose antialiasing and go
 	// hard. HUDRestoreSoft below 1 blends back toward the graded pixel — softer, less immune.
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bHUDExemptFromPP = true;
+	/** OFF by default since the GradeComp route replaced it: the stencil restore was ignored on the
+	 *  nDisplay wall viewport, and any blendable at AFTER_TONEMAPPING upset the compositor (border). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bHUDExemptFromPP = false;
+
+	/** The hairline rules and the progress bar under the readout. Off on request — the text carries
+	 *  the information, the lines were furniture. Flip back on here if a layout ever needs them. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bShowHUDLines = false;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="1", ClampMax="255")) int32 HUDStencil = 7;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") TObjectPtr<UMaterialInterface> HUDPostMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> HUDPostMID;
@@ -1292,6 +1308,55 @@ private:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel", meta=(ClampMin="-20.0", ClampMax="20.0"))
 	float OrbitAutoYawDegPerSec = 0.f;
 
+	/** ═══ IDLE ORBIT — the show never sits dead still. ═══
+	 *  After IdleOrbitAfterSeconds without ANY operator input (Slate's last-interaction clock, so every
+	 *  binding present and future counts) the world starts a slow yaw drift with a gentle pitch breath,
+	 *  eased in over IdleOrbitRampIn. Any input eases it back out over IdleOrbitRampOut — there is no
+	 *  "return": the stick simply takes over from wherever the drift left the orbit, which is why the
+	 *  pitch breath is applied as a DELTA around the operator's own pitch, never an absolute angle.
+	 *  ZoomProgress is deliberately untouched — zoom is narrative, idle is only the camera wandering.
+	 *  Runs in PollInput on the primary; wall + floor follow through the existing yaw/pitch broadcast. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit")
+	bool bIdleOrbit = true;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit", meta=(ClampMin="1.0", ClampMax="300.0"))
+	float IdleOrbitAfterSeconds = 10.f;
+	/** Drift rate. 2.5 deg/s = one revolution in about 2.4 minutes. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit", meta=(ClampMin="-20.0", ClampMax="20.0"))
+	float IdleOrbitYawDegPerSec = 2.5f;
+	/** Pitch breath amplitude (± deg, around wherever the operator left the pitch). 0 = yaw only. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit", meta=(ClampMin="0.0", ClampMax="30.0"))
+	float IdleOrbitPitchDeg = 4.f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit", meta=(ClampMin="1.0", ClampMax="120.0"))
+	float IdleOrbitPitchPeriod = 18.f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit", meta=(ClampMin="0.05", ClampMax="30.0"))
+	float IdleOrbitRampIn = 4.f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Idle Orbit", meta=(ClampMin="0.05", ClampMax="10.0"))
+	float IdleOrbitRampOut = 0.6f;
+	float IdleWeight = 0.f;      // 0 = operator, 1 = fully drifting; ramped, then smoothstepped
+	float IdlePhase = 0.f;       // seconds into the pitch breath
+	float IdlePitchPrev = 0.f;   // last applied breath offset, so only the delta is added each frame
+
+	/** ═══ PERF BISECT — number keys 1-9 mute ladder rows 0-8 at runtime. ═══
+	 *  A muted row goes down the same path as bActive=false in ApplyStations (hidden, children hidden,
+	 *  fade cache zeroed), so its sublevel's whole draw cost leaves the frame — that is the point: watch
+	 *  the FPS line (F2) while muting rows one by one and the expensive station names itself. Runtime
+	 *  only and deliberately NOT saved with the level: bActive stays the authored truth, this is a
+	 *  diagnostic overlay on top of it. Cluster-synced, so the wall bisects the same frame you do. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0"))
+	int32 StationMuteMask = 0;
+	uint16 PrevDigitBits = 0;    // rising-edge state for the 1-9 keys
+
+	/** Y cycles the HUD through three states: 0 = default, nothing on screen (clean); 1 = the
+	 *  editorial HUD exactly as before; 2 = the MUTE MENU — the readout becomes a station list,
+	 *  D-Pad Up/Down moves the cursor, A mutes/unmutes the selected row, B unmutes everything.
+	 *  While the menu is up the D-Pad and A/B are the menu's (PP preset and filler density are
+	 *  guarded off so a bisect can't accidentally rebuild the fillers); LB/RB/X/triggers/sticks
+	 *  keep working, so you can zoom to the bad spot WITH the menu open. Keys 1-9 work in every
+	 *  mode. Startup state is this property — 0 per the show default, set 1 to boot with HUD. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0", ClampMax="2"))
+	int32 HUDMode = 0;
+	int32 MuteSel = 0;           // menu cursor, cluster-synced so the wall shows the same row
+
 	float OrbitYaw = 0.f, OrbitPitch = 0.f, ZoomVel = 0.f;
 	float PrevZoom = 0.f;      // for a cluster-consistent visual velocity (ZoomProgress delta, valid on every node)
 	float ObserverSize = 1.70f;
@@ -1337,6 +1402,7 @@ private:
 	float   FpsCurrent = 0.f;                        // lightly smoothed, or it is unreadable
 	float   FpsMedian = 0.f;
 	float   FpsMedianTimer = 0.f;                    // resort a few times a second, not every frame
+	double  FpsLastWall = 0.0;                       // real wall-clock of the last sample — Dt is a LIE under bUseFixedFrameRate
 
 	/** Readout diagnostic: which station currently dominates and what fade it is being given,
 	 *  next to how many cached DMIs actually carry a StationFade parameter. If a station is

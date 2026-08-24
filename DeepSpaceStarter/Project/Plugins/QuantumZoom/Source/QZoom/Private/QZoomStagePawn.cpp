@@ -25,6 +25,7 @@
 #include "Cluster/IDisplayClusterClusterManager.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
+#include "Framework/Application/SlateApplication.h"   // idle orbit: last-user-interaction clock
 #include "Components/HeterogeneousVolumeComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -162,6 +163,12 @@ void AQZoomStagePawn::BeginPlay()
 	}
 	UE_LOG(LogTemp, Log, TEXT("[QZoomStagePawn] cluster=%d primary=%d"), bInCluster, bIsPrimary);
 
+	// The show boots in whatever HUD state is authored (default 0 = clean). Before this, the HUD
+	// was always on at start and Y only ever hid it.
+	HUDMode = FMath::Clamp(HUDMode, 0, 2);
+	bCleanMode = (HUDMode == 0);
+	SetCleanMode(bCleanMode);
+
 	// SVT STREAMING BANDWIDTH (the mip-pop fix, see UpdateOxidation): the default 512 MiB/s throttle serves
 	// LOWER MIPS when exceeded — our ping-pong's fast sweep (2 volumes x ~187 fps peak x ~1.4 MB/frame)
 	// blows through it, so the sulfur switch flashed blurry near every turnaround. Deep Space nodes have
@@ -194,8 +201,14 @@ void AQZoomStagePawn::BeginPlay()
 	if (!ReadoutMaterial)
 		ReadoutMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_ReadoutText.M_ReadoutText"));
 	if (ReadoutMaterial)
+	{
+		// One shared MID so ApplyPPPreset can drive GradeComp (the anti-grade brightness boost).
+		// A material without the parameter just ignores the write — nothing depends on the patch
+		// script having run.
+		if (!TextMID) TextMID = UMaterialInstanceDynamic::Create(ReadoutMaterial, this);
 		for (UTextRenderComponent* T : { Readout, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv })
-			if (T) T->SetTextMaterial(ReadoutMaterial);
+			if (T) T->SetTextMaterial(TextMID ? (UMaterialInterface*)TextMID : ReadoutMaterial.Get());
+	}
 	if (Readout) Readout->SetTextRenderColor(TextColor.ToFColor(true));   // constant readout uses the interface colour
 
 	// HUD ON TOP, no environment reaction (Michael): the text was being occluded by 3D objects and picking up
@@ -612,6 +625,64 @@ void AQZoomStagePawn::PollInput(float Dt)
 	}
 	ApplyFreeLook(LookYaw, LookPitch);
 
+	// ── IDLE ORBIT ──────────────────────────────────────────────────────────────────────────────────────
+	// Slate's interaction clock is the "any input" detector: every key, axis and future binding resets it
+	// without this code keeping a list. Belt-and-braces: OR in the analogs parsed above, in case a pad
+	// driver does not repeat held-analog events into Slate. Buttons need no such guard — a held button
+	// was pressed once, and that press went through Slate.
+	{
+		double SinceInput = double(IdleOrbitAfterSeconds);   // no Slate (headless/cook) → treat as idle
+		if (FSlateApplication::IsInitialized())
+		{
+			FSlateApplication& Slate = FSlateApplication::Get();
+			SinceInput = Slate.GetCurrentTime() - Slate.GetLastUserInteractionTime();
+		}
+		const bool bAnalogHeld = (RT > 0.f || LT > 0.f || RX != 0.f || RY != 0.f || LX != 0.f || LY != 0.f);
+		const bool bWantIdle = bIdleOrbit && !bAnalogHeld && SinceInput >= double(IdleOrbitAfterSeconds);
+		const float Rate = bWantIdle ?  1.f / FMath::Max(IdleOrbitRampIn,  0.05f)
+		                             : -1.f / FMath::Max(IdleOrbitRampOut, 0.05f);
+		IdleWeight = FMath::Clamp(IdleWeight + Rate * Dt, 0.f, 1.f);
+		if (IdleWeight > 0.f)
+		{
+			const float e = IdleWeight * IdleWeight * (3.f - 2.f * IdleWeight);   // smoothstep the ramp
+			OrbitYaw = FMath::Fmod(OrbitYaw + e * IdleOrbitYawDegPerSec * Dt, 360.f);
+			IdlePhase += Dt;
+			const float Breath = IdleOrbitPitchDeg
+				* FMath::Sin(2.f * PI * IdlePhase / FMath::Max(IdleOrbitPitchPeriod, 1.f));
+			// the DELTA, weighted: the breath oscillates around the operator's own pitch (OrbitPitch is
+			// free and unclamped), and while easing out the remaining offset is walked back to zero by
+			// the shrinking weight instead of being dropped in one visible step.
+			OrbitPitch += e * Breath - IdlePitchPrev;
+			IdlePitchPrev = e * Breath;
+		}
+		else
+		{
+			OrbitPitch -= IdlePitchPrev;   // the frame the weight dies, take the last breath offset with it
+			IdlePhase = 0.f;
+			IdlePitchPrev = 0.f;
+		}
+	}
+
+	// ── PERF BISECT: 1-9 toggle-mute ladder rows 0-8 ────────────────────────────────────────────────────
+	// Keyboard only, on purpose: this is a desk diagnostic, and every gamepad button is already spoken for.
+	{
+		static const FKey DigitKeys[9] = { EKeys::One, EKeys::Two, EKeys::Three, EKeys::Four, EKeys::Five,
+		                                   EKeys::Six, EKeys::Seven, EKeys::Eight, EKeys::Nine };
+		uint16 Bits = 0;
+		for (int32 i = 0; i < 9; ++i)
+			if (PC->IsInputKeyDown(DigitKeys[i])) Bits |= uint16(1) << i;
+		const uint16 Pressed = Bits & ~PrevDigitBits;
+		PrevDigitBits = Bits;
+		for (int32 i = 0; i < 9; ++i)
+			if (Pressed & (uint16(1) << i))
+			{
+				StationMuteMask ^= (1 << i);
+				const FString RowName = Handover.IsValidIndex(i) ? Handover[i].Name.ToString() : TEXT("?");
+				UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] row %d (%s) %s  mask=0x%X"),
+					i, *RowName, (StationMuteMask & (1 << i)) ? TEXT("MUTED") : TEXT("unmuted"), StationMuteMask);
+			}
+	}
+
 	// D-Pad Up/Down = PP preset; D-Pad Left/Right = space-filler cycle. Rising-edge.
 	// KEYBOARD EQUIVALENTS. These were gamepad-only, so at a desk without a controller the
 	// preset switcher simply did not exist — which is what "the post processing switcher is
@@ -621,10 +692,22 @@ void AQZoomStagePawn::PollInput(float Dt)
 	const bool bDn = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Down)  || PC->IsInputKeyDown(EKeys::O);
 	const bool bLf = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Left)  || PC->IsInputKeyDown(EKeys::J);
 	const bool bRt = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Right) || PC->IsInputKeyDown(EKeys::K);
-	if (bUp && !bUpPrev)    { PPPreset   = (PPPreset   + 1) % 10; ApplyPPPreset(PPPreset); }
-	if (bDn && !bDownPrev)  { PPPreset   = (PPPreset   + 9) % 10; ApplyPPPreset(PPPreset); }
-	if (bRt && !bRightPrev) { FillerMode = (FillerMode + 1) % 4; SetFillerMode(FillerMode); }
-	if (bLf && !bLeftPrev)  { FillerMode = (FillerMode + 3) % 4; SetFillerMode(FillerMode); }
+	if (HUDMode == 2)
+	{
+		// MUTE MENU is modal on the D-Pad: Up/Down move the cursor. The preset/filler bindings are
+		// deliberately swallowed — cycling a PP preset or rebuilding the fillers mid-bisect would
+		// change the very frame time being measured.
+		const int32 NRows = FMath::Clamp(StationCount, 1, 9);
+		if (bUp && !bUpPrev)   MuteSel = (MuteSel + NRows - 1) % NRows;
+		if (bDn && !bDownPrev) MuteSel = (MuteSel + 1) % NRows;
+	}
+	else
+	{
+		if (bUp && !bUpPrev)    { PPPreset   = (PPPreset   + 1) % 10; ApplyPPPreset(PPPreset); }
+		if (bDn && !bDownPrev)  { PPPreset   = (PPPreset   + 9) % 10; ApplyPPPreset(PPPreset); }
+		if (bRt && !bRightPrev) { FillerMode = (FillerMode + 1) % 4; SetFillerMode(FillerMode); }
+		if (bLf && !bLeftPrev)  { FillerMode = (FillerMode + 3) % 4; SetFillerMode(FillerMode); }
+	}
 	bUpPrev = bUp; bDownPrev = bDn; bLeftPrev = bLf; bRightPrev = bRt;
 
 	// LB / RB = STYLE LIGHT intensity (the freed S4 key light). 5 steps: off / dim / base / bright / blown.
@@ -666,9 +749,27 @@ void AQZoomStagePawn::PollInput(float Dt)
 	CH4SpeedNow = FMath::FInterpTo(CH4SpeedNow, SpeedTarget, Dt, 3.5f);
 
 	// A / B (face bottom/right) = filler DENSITY (moved off the shoulders). 5 levels, sparse -> EXTREME.
+	// In the MUTE MENU they are the menu's instead: A toggles the selected row, B unmutes everything.
 	const bool bA = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Bottom), bB = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Right);
-	if (bB && !bBPrev) { FillerDensity = FMath::Min(FillerDensity + 1, 4); InitFillers(); }
-	if (bA && !bAPrev) { FillerDensity = FMath::Max(FillerDensity - 1, 0); InitFillers(); }
+	if (HUDMode == 2)
+	{
+		if (bA && !bAPrev)
+		{
+			StationMuteMask ^= (1 << MuteSel);
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] row %d %s  mask=0x%X"), MuteSel,
+				(StationMuteMask & (1 << MuteSel)) ? TEXT("MUTED") : TEXT("unmuted"), StationMuteMask);
+		}
+		if (bB && !bBPrev && StationMuteMask != 0)
+		{
+			StationMuteMask = 0;
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] all rows unmuted"));
+		}
+	}
+	else
+	{
+		if (bB && !bBPrev) { FillerDensity = FMath::Min(FillerDensity + 1, 4); InitFillers(); }
+		if (bA && !bAPrev) { FillerDensity = FMath::Max(FillerDensity - 1, 0); InitFillers(); }
+	}
 	bAPrev = bA; bBPrev = bB;
 
 	// X (face-button left) = cycle the NirA representation: 0 high-res FBX / 1 low-res FBX / 2 procedural
@@ -676,9 +777,18 @@ void AQZoomStagePawn::PollInput(float Dt)
 	if (bX && !bXPrev) { NiraVersion = (NiraVersion + 1) % FMath::Max(NiraVersionCount, 1); }
 	bXPrev = bX;
 
-	// Y (face-button top) = CLEAN MODE: hide the whole HUD for clean photography plates.
+	// Y (face-button top) = HUD cycle: default(clean) -> editorial HUD -> mute menu -> default.
+	// bCleanMode stays as the derived "is anything visible" flag so SetCleanMode and the existing
+	// cluster "clean" parameter keep meaning what they always meant.
 	const bool bY = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Top);
-	if (bY && !bYPrev) { bCleanMode = !bCleanMode; SetCleanMode(bCleanMode); }
+	if (bY && !bYPrev)
+	{
+		HUDMode = (HUDMode + 1) % 3;
+		bCleanMode = (HUDMode == 0);
+		SetCleanMode(bCleanMode);
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] HUD mode %d (%s)"), HUDMode,
+			HUDMode == 0 ? TEXT("clean") : HUDMode == 1 ? TEXT("HUD") : TEXT("MUTE MENU"));
+	}
 	bYPrev = bY;
 
 	// F2 toggles the authoring guides (front-facing marker + centre reticle). Keyboard-only ON PURPOSE: it is
@@ -746,6 +856,9 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("nan"),   FString::FromInt(NaniteDiagStep));       // Nanite diagnostic mode: every node
 	Event.Parameters.Add(TEXT("lyaw"),  FString::SanitizeFloat(LookYaw));        // free-look offset: the FLOOR node needs it
 	Event.Parameters.Add(TEXT("lpit"),  FString::SanitizeFloat(LookPitch));      // (floor is a separate node, no PollInput)
+	Event.Parameters.Add(TEXT("mute"),  FString::FromInt(StationMuteMask));      // perf-bisect: every node drops the same rows
+	Event.Parameters.Add(TEXT("hudm"),  FString::FromInt(HUDMode));              // Y-cycle state (clean / HUD / mute menu)
+	Event.Parameters.Add(TEXT("msel"),  FString::FromInt(MuteSel));              // menu cursor, so the wall highlights the same row
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
 }
 
@@ -783,6 +896,18 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	// event and drive ApplyFreeLook here so every node's DCRA/viewpoints rotate identically.
 	if (const FString* Ly = E.Parameters.Find(TEXT("lyaw")))  LookYaw   = FCString::Atof(**Ly);
 	if (const FString* Lp = E.Parameters.Find(TEXT("lpit")))  LookPitch = FCString::Atof(**Lp);
+	if (const FString* Mu = E.Parameters.Find(TEXT("mute")))  StationMuteMask = FCString::Atoi(**Mu);   // ApplyStations below picks it up
+	if (const FString* Ms = E.Parameters.Find(TEXT("msel")))  MuteSel = FCString::Atoi(**Ms);
+	if (const FString* Hm = E.Parameters.Find(TEXT("hudm")))
+	{
+		const int32 NewMode = FCString::Atoi(**Hm);
+		if (NewMode != HUDMode)   // visibility only on change — SetCleanMode toggles components
+		{
+			HUDMode = NewMode;
+			bCleanMode = (HUDMode == 0);
+			SetCleanMode(bCleanMode);
+		}
+	}
 	if (!bIsPrimary) ApplyFreeLook(LookYaw, LookPitch);   // primary already applied it in PollInput this frame
 	ApplyStations();
 }
@@ -884,12 +1009,23 @@ float AQZoomStagePawn::LocalK() const
 
 void AQZoomStagePawn::SampleFPS(float Dt)
 {
-	if (Dt <= 0.f) return;
+	// Dt IS A CONSTANT AND MUST NOT BE MEASURED. DefaultEngine.ini runs bUseFixedFrameRate=60,
+	// and under a fixed frame rate the engine hands every Tick exactly 1/60 s HOWEVER long the
+	// frame really took — which is why the counter sat at a rock-steady 60 while the show was
+	// visibly struggling. Real elapsed wall time is the only honest sample; Dt is still used
+	// below only as the smoothing step, where a nominal step is fine.
+	const double Now = FPlatformTime::Seconds();
+	if (FpsLastWall <= 0.0) { FpsLastWall = Now; return; }
+	const float Real = (float)(Now - FpsLastWall);
+	FpsLastWall = Now;
+	// >1 s is a stall (level load, PIE spin-up), not a frame — poisoning a 20 s median with one
+	// 5 s sample would flatten it for half a minute.
+	if (Real <= 0.f || Real > 1.f) return;
 
-	// CURRENT is smoothed over ~0.25 s. Raw 1/Dt swings by tens of frames between ticks and is
+	// CURRENT is smoothed over ~0.25 s. Raw 1/dt swings by tens of frames between ticks and is
 	// genuinely unreadable on a wall; this still moves instantly enough to catch a hitch.
-	const float Inst = 1.f / Dt;
-	FpsCurrent = (FpsCurrent <= 0.f) ? Inst : FMath::FInterpTo(FpsCurrent, Inst, Dt, 4.f);
+	const float Inst = 1.f / Real;
+	FpsCurrent = (FpsCurrent <= 0.f) ? Inst : FMath::FInterpTo(FpsCurrent, Inst, FMath::Max(Dt, Real), 4.f);
 
 	// Ring sized for the window at a generous frame rate. If the machine runs faster than this
 	// the window simply covers less than FpsWindowSeconds rather than misreporting.
@@ -900,7 +1036,7 @@ void AQZoomStagePawn::SampleFPS(float Dt)
 		FpsHead = 0;
 		FpsFilled = 0;
 	}
-	FpsRing[FpsHead] = Dt;
+	FpsRing[FpsHead] = Real;
 	FpsHead = (FpsHead + 1) % FpsRing.Num();
 	FpsFilled = FMath::Min(FpsFilled + 1, FpsRing.Num());
 
@@ -908,7 +1044,7 @@ void AQZoomStagePawn::SampleFPS(float Dt)
 	// recompute a few times a second. The window is walked BACKWARDS accumulating real elapsed
 	// time, which means it is exactly FpsWindowSeconds of history regardless of frame rate —
 	// a fixed sample count would silently be 5 s at 240 fps and 40 s at 30 fps.
-	FpsMedianTimer -= Dt;
+	FpsMedianTimer -= Real;
 	if (FpsMedianTimer > 0.f) return;
 	FpsMedianTimer = 0.25f;
 
@@ -1700,7 +1836,10 @@ void AQZoomStagePawn::ApplyStations()
 		// A retired stage keeps its slot in the ladder — and therefore keeps every actor tag below it
 		// pointing at the right row — but never renders. This is how a stage is dropped from the show
 		// without deleting content or renumbering anything.
-		if (Handover.IsValidIndex(N) && !Handover[N].bActive)
+		// Perf-bisect mute (keys 1-9) rides the exact same rail as an authored retirement, so a muted
+		// station's cost leaves the frame the same way a retired one's does — nothing half-hidden.
+		if ((N < 32 && (StationMuteMask & (1 << N))) ||
+		    (Handover.IsValidIndex(N) && !Handover[N].bActive))
 		{
 			StationFadeCache.SetNumZeroed(FMath::Max(StationCount, N + 1));
 			StationFadeCache[N] = 0.f;
@@ -2306,7 +2445,7 @@ void AQZoomStagePawn::SetCleanMode(bool bOn)
 	UTextRenderComponent* Texts[] = { Readout, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv };
 	for (UTextRenderComponent* T : Texts) if (T) T->SetVisibility(!bOn);
 	UStaticMeshComponent* Rules[] = { ReadoutBar, ReadoutBarFill, DetailRule };
-	for (UStaticMeshComponent* M : Rules) if (M) M->SetVisibility(!bOn);
+	for (UStaticMeshComponent* M : Rules) if (M) M->SetVisibility(!bOn && bShowHUDLines);
 	if (bOn && ReadoutBG) ReadoutBG->SetVisibility(false);   // panel is off by default; only ever hide it
 }
 
@@ -2746,6 +2885,29 @@ FString AQZoomStagePawn::FormatScale(float M) const
 void AQZoomStagePawn::UpdateReadout()
 {
 	if (!Readout) return;
+
+	// ── MUTE MENU (HUDMode 2): the readout becomes the bisect panel. FPS is forced on here —
+	// the menu exists to watch frame time against the station list, so hiding it behind bShowFPS
+	// would defeat the mode. Early return: the editorial text below has no business overwriting this.
+	if (HUDMode == 2)
+	{
+		FString Menu = FString::Printf(
+			TEXT("PERF BISECT                    [Y] weiter\nFPS        %.0f  |  median %.0f\nDEPTH      %.0f%%\n"),
+			FpsCurrent, FpsMedian, ZoomProgress * 100.f);
+		const int32 NRows = FMath::Clamp(StationCount, 1, 9);
+		for (int32 i = 0; i < NRows; ++i)
+		{
+			const bool bMuted = (StationMuteMask & (1 << i)) != 0;
+			const bool bRet   = Handover.IsValidIndex(i) && !Handover[i].bActive;
+			Menu += FString::Printf(TEXT("\n%s [%d] %-14s %s"),
+				(i == MuteSel) ? TEXT(">") : TEXT("  "), i + 1,
+				Handover.IsValidIndex(i) ? *Handover[i].Name.ToString() : TEXT("?"),
+				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"));
+		}
+		Menu += TEXT("\n\n[A] mute   [B] alle an   [DPad] waehlen");
+		Readout->SetText(FText::FromString(Menu));
+		return;
+	}
 	const float M     = CurrentScaleMeters();
 	const float Ref   = (ScaleMeters.Num() > 0) ? ScaleMeters[0] : 1.f;
 	const float Power = FMath::LogX(10.f, FMath::Max(Ref, 1e-30f) / FMath::Max(M, 1e-30f));
@@ -2808,6 +2970,17 @@ void AQZoomStagePawn::UpdateReadout()
 			CH4Station, CH4GateFade, CH4Phase,
 			(bCH4Running ? TEXT("RUNNING") : TEXT("stopped  [RB]")), CH4SpeedNow);
 	}
+	// PERF-BISECT line: only while something is muted, so normal shows stay clean. Lists every muted
+	// row by name — "which key do I press to bring it back" must be readable off the wall.
+	FString MuteLine;
+	if (StationMuteMask != 0)
+	{
+		MuteLine = TEXT("\nMUTED     ");
+		for (int32 i = 0; i < 9; ++i)
+			if (StationMuteMask & (1 << i))
+				MuteLine += FString::Printf(TEXT(" [%d]%s"), i + 1,
+					Handover.IsValidIndex(i) ? *Handover[i].Name.ToString() : TEXT("?"));
+	}
 	FString NanLine;
 	if (NaniteDiagStep != 0)
 	{
@@ -2822,7 +2995,7 @@ void AQZoomStagePawn::UpdateReadout()
 	}
 	Readout->SetText(FText::FromString(FString::Printf(
 		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s @ %.0f%%\nFILLERS    %s  [%s]"
-		     "\nAUDIO      %d/%d live  |  peak %.2f  |  master %.2f%s%s%s%s"),
+		     "\nAUDIO      %d/%d live  |  peak %.2f  |  master %.2f%s%s%s%s%s"),
 		*FormatScale(ObserverSize), *FormatRate(ObserverSpeed), *FormatZoom(Power), ZoomProgress * 100.f,
 		PPNames[FMath::Clamp(PPPreset, 0, 9)],
 		// THE BLEND WEIGHT. "The preset is not active" and "the preset is active at weight 0"
@@ -2836,7 +3009,7 @@ void AQZoomStagePawn::UpdateReadout()
 		// spawned, tracks spawned but not playing, or playing and faded to nothing. These four
 		// numbers separate all three at a glance.
 		AudioLive, StageAudio.Num(), AudioPeak, MasterVolume,
-		*PalLine, *NanLine, *FpsLine, *FadeLine)));
+		*PalLine, *NanLine, *FpsLine, *FadeLine, *MuteLine)));
 
 	// Drive the progress FILL: grows from the fixed left end (ReadoutBarLeft) toward the right.
 	if (ReadoutBarFill)
@@ -3363,6 +3536,26 @@ void AQZoomStagePawn::ApplyPPPreset(int32 P)
 	default: break;  // 0 neutral — no overrides at all, the raw look
 	}
 	PPVolume->Settings = S;
+	// Assigning a fresh FPostProcessSettings wiped WeightedBlendables, so if the (legacy, default-
+	// off) stencil restore is in use it must be re-added. Idempotent.
+	if (bHUDExemptFromPP && HUDPostMID) PPVolume->AddOrUpdateBlendable(HUDPostMID, 1.f);
+
+	// GRADE COMPENSATION for the HUD text. The stencil/blendable restore was retired: the wall
+	// viewport ignored the PP stencil test and any blendable at AFTER_TONEMAPPING disturbed the
+	// nDisplay compositor (the border). Instead the text does what the HDR particles already do
+	// to survive P5 — carry enough brightness that the grade lands it back where it was authored.
+	// Emissive is pre-divided by the preset's tint and exposure; contrast still bends the result
+	// slightly (reads as marginally brighter text, not a colour shift). Two honest limits: under
+	// P8 Noir (saturation 0) no colour can survive — the text goes grey with the frame — and the
+	// boosted value blooms a little, tunable via TextCompMax.
+	if (TextMID)
+	{
+		const FLinearColor T = S.bOverride_SceneColorTint ? S.SceneColorTint : FLinearColor::White;
+		const float Ex = S.bOverride_AutoExposureBias ? FMath::Pow(2.f, S.AutoExposureBias) : 1.f;
+		auto Comp = [&](float c){ return FMath::Clamp(1.f / FMath::Max(c * Ex, 1e-3f), 1.f, TextCompMax); };
+		TextMID->SetVectorParameterValue(TEXT("GradeComp"),
+			FLinearColor(Comp(T.R), Comp(T.G), Comp(T.B), 1.f));
+	}
 	UE_LOG(LogTemp, Log, TEXT("[QZoomStage] PP preset %d"), P);
 }
 
