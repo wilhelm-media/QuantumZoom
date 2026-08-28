@@ -1132,6 +1132,12 @@ public:
 
 private:
 	float CH4HoldT = 0.f;        // how long RB has been down this press
+	bool bCH4SeqPrimed = false;  // the sequence player needs ONE Play/Pause before scrubs evaluate
+	/** Actors tagged QZCH4FadeIn (the visiting enzymes) materialise in over this many seconds of
+	 *  sequence time — their materials' SeqFade parameter rides the same noise erosion as the
+	 *  station dissolve. At phase 0 (stopped) they are fully eroded away. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.1", ClampMax="20.0"))
+	float CH4IntroFadeSeconds = 3.f;
 	float CH4SpeedNow = 1.f;     // eased speed multiplier: 1 normally, CH4SpeedMax while held
 	bool bAPrev  = false, bBPrev  = false;                                            // A/B density latches
 	int32 NiraVersion = 1;   // S2 NirA representation: 0 high-res FBX / 1 low-res FBX (default) / 2 procedural / 3 hull
@@ -1368,6 +1374,11 @@ private:
 	 *  not show mode. Everything restores exactly on toggle-off. */
 	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
 	bool bSimpleShaders = false;
+	/** Mute-menu [D-Pad Right]: every Niagara system off/on. The third bisect axis — stations
+	 *  (1-9/A), shaders (X), particles (this). Enforced per frame in the fade loop, so nothing
+	 *  reactivates a muted system; cluster-synced. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bParticlesMuted = false;
 	/** The stand-in. Auto-loaded from M_QZ_SimpleShader if unset. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect")
 	TObjectPtr<UMaterialInterface> SimpleShaderMaterial;

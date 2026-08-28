@@ -700,6 +700,12 @@ void AQZoomStagePawn::PollInput(float Dt)
 		const int32 NRows = FMath::Clamp(StationCount, 1, 9);
 		if (bUp && !bUpPrev)   MuteSel = (MuteSel + NRows - 1) % NRows;
 		if (bDn && !bDownPrev) MuteSel = (MuteSel + 1) % NRows;
+		if (bRt && !bRightPrev)
+		{
+			bParticlesMuted = !bParticlesMuted;
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] particles %s"),
+				bParticlesMuted ? TEXT("MUTED") : TEXT("on"));
+		}
 	}
 	else
 	{
@@ -865,6 +871,9 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("hudm"),  FString::FromInt(HUDMode));              // Y-cycle state (clean / HUD / mute menu)
 	Event.Parameters.Add(TEXT("msel"),  FString::FromInt(MuteSel));              // menu cursor, so the wall highlights the same row
 	Event.Parameters.Add(TEXT("simp"),  FString::FromInt(bSimpleShaders ? 1 : 0)); // shader stand-in: every node must swap or the compare is meaningless
+	Event.Parameters.Add(TEXT("c4p"),   FString::SanitizeFloat(CH4Phase));         // the reaction clock: floor + wall must scrub the same frame
+	Event.Parameters.Add(TEXT("c4r"),   FString::FromInt(bCH4Running ? 1 : 0));
+	Event.Parameters.Add(TEXT("pmut"),  FString::FromInt(bParticlesMuted ? 1 : 0)); // particle bisect axis: all nodes drop them together
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
 }
 
@@ -909,6 +918,19 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 		const bool bNewSimple = (FCString::Atoi(**Sp) != 0);
 		if (bNewSimple != bSimpleShaders) { bSimpleShaders = bNewSimple; ApplySimpleShaders(bSimpleShaders); }
 	}
+	// SECONDARIES ONLY — the same rule free-look follows. This receive also fires on the primary
+	// (self-loopback), and applying the echo there overwrote the live clock with last frame's
+	// value and fought the RB toggle with its own stale echo: the phase froze and the running
+	// state flickered, which read as "play/stop changes the look, wall only". The primary OWNS
+	// the clock; everyone else copies it.
+	if (!bIsPrimary)
+	{
+		if (const FString* C4 = E.Parameters.Find(TEXT("c4p")))  CH4Phase = FCString::Atof(**C4);
+		if (const FString* C4r = E.Parameters.Find(TEXT("c4r"))) bCH4Running = (FCString::Atoi(**C4r) != 0);
+	}
+	// a toggle STATE, not an integrated clock — the primary's self-echo carries the same value,
+	// so applying it everywhere is idempotent (unlike c4p, which oscillated)
+	if (const FString* Pm = E.Parameters.Find(TEXT("pmut"))) bParticlesMuted = (FCString::Atoi(**Pm) != 0);
 	if (const FString* Hm = E.Parameters.Find(TEXT("hudm")))
 	{
 		const int32 NewMode = FCString::Atoi(**Hm);
@@ -1758,7 +1780,11 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 	// station fade still governs VISIBILITY — the molecules belong to that stage — but no longer
 	// governs the clock.
 	const bool bStationUp = bCH4Running;
-	if (bCH4Running)
+	// THE CLOCK ADVANCES ON THE PRIMARY ONLY. CH4Phase rides the cluster event (c4p) to every
+	// other node — the floor is a separate node where RB is never pressed, so advancing locally
+	// left its phase at 0 forever: sequence pinned to frame 0, visitors eroded away by the intro
+	// fade — "the animation is not visible on the floor". Secondaries take the synced value.
+	if (bCH4Running && (bIsPrimary || !bInCluster))
 	{
 		const float Step = Dt / FMath::Max(CH4CycleSeconds, 0.01f) * CH4SpeedNow;
 		CH4Phase = FMath::Fmod(CH4Phase + Step, 1.f);   // loops for as long as it is left running
@@ -1826,9 +1852,59 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 			if (!SA || !SA->Tags.Contains(FName(TEXT("QZCH4Sequence")))) continue;
 			if (ULevelSequencePlayer* Pl = SA->GetSequencePlayer())
 			{
+				// A player that has never been started does not evaluate a Scrub — its bindings
+				// are only resolved on the first Play. One Play/Pause pair on first contact
+				// initialises them (auto-play stays off; the scrub owns the clock afterwards).
+				// Without this the RB toggle advanced CH4Phase and nothing on screen moved.
+				if (!bCH4SeqPrimed)
+				{
+					Pl->Play();
+					Pl->Pause();
+					bCH4SeqPrimed = true;
+					UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] CH4 sequence primed for scrubbing"));
+				}
 				const float T = CH4Phase * FMath::Max(CH4SequenceSeconds, 0.01f);
 				Pl->SetPlaybackPosition(
 					FMovieSceneSequencePlaybackParams(T, EUpdatePositionMethod::Scrub));
+			}
+		}
+
+		// INTRO FADE for the visiting enzymes: SeqFade rides the first CH4IntroFadeSeconds of
+		// sequence time, written to the SAME DMIs the material cache owns (per component, so the
+		// shared atom masters fade only on the tagged actors). At phase 0 the visitors are fully
+		// eroded away — the animation begins with the methionine alone.
+		const float SeqT = CH4Phase * FMath::Max(CH4SequenceSeconds, 0.01f);
+		const float IntroFade = FMath::Clamp(SeqT / FMath::Max(CH4IntroFadeSeconds, 0.1f), 0.f, 1.f);
+		for (auto& Pair : ActorMats)
+		{
+			AActor* A = Pair.Key.Get();
+			if (!A || !A->Tags.Contains(FName(TEXT("QZCH4FadeIn")))) continue;
+			for (int32 Idx : Pair.Value)
+				if (MatCache.IsValidIndex(Idx))
+					if (UMaterialInstanceDynamic* DMI = MatCache[Idx].DMI.Get())
+						DMI->SetScalarParameterValue(TEXT("SeqFade"), IntroFade);
+
+			// The fade must reach the whole SUBTREE: the oxygen carries a particle system as an
+			// attached child. Niagara gets the value as a user float (bind it in the emitter for
+			// a real fade) — and a hard activation gate besides, so "invisible at the start" holds
+			// even for a system that ignores the parameter. Runs after the station loop's own
+			// activate/deactivate in the tick, so this gate wins while the intro is at zero.
+			TArray<AActor*> Subtree;
+			A->GetAttachedActors(Subtree, true, /*recursive=*/true);
+			Subtree.Add(A);
+			for (AActor* S : Subtree)
+			{
+				TArray<UNiagaraComponent*> NCs;
+				S->GetComponents<UNiagaraComponent>(NCs);
+				for (UNiagaraComponent* NC : NCs)
+				{
+					NC->SetVariableFloat(FName(TEXT("SeqFade")), IntroFade);
+					// gate composes with the STATION's own visibility — never activate something
+					// the station loop just hid because the viewer is elsewhere on the bar
+					const bool bOn = IntroFade > 0.002f && CH4Fade > 0.002f && !bParticlesMuted;
+					if (!bOn && NC->IsActive())      NC->Deactivate();
+					else if (bOn && !NC->IsActive()) NC->Activate(true);
+				}
 			}
 		}
 	}
@@ -2083,6 +2159,13 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 		if (!PC) continue;
 		if (UNiagaraComponent* NC = Cast<UNiagaraComponent>(PC))
 		{
+			// PERF BISECT: the particle axis. Enforced here, in the one loop that owns Niagara
+			// activation, so nothing else can switch a muted system back on.
+			if (bParticlesMuted)
+			{
+				if (NC->IsActive()) NC->Deactivate();
+				continue;
+			}
 			// User.StationFade — bind it to alpha in the system and the emitter dissolves with
 			// the stage. SetVariableFloat (FName) rather than SetNiagaraVariableFloat (FString):
 			// the FString overload is deprecated and was the one C4996 in this build.
@@ -3003,8 +3086,10 @@ void AQZoomStagePawn::UpdateReadout()
 				Handover.IsValidIndex(i) ? *Handover[i].Name.ToString() : TEXT("?"),
 				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"));
 		}
-		Menu += FString::Printf(TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [DPad] waehlen"),
-			bSimpleShaders ? TEXT("EINFACH") : TEXT("voll"));
+		Menu += FString::Printf(
+			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s   [DPad] waehlen"),
+			bSimpleShaders ? TEXT("EINFACH") : TEXT("voll"),
+			bParticlesMuted ? TEXT("AUS") : TEXT("an"));
 		Readout->SetText(FText::FromString(Menu));
 		return;
 	}
