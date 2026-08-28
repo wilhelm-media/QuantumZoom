@@ -773,8 +773,13 @@ void AQZoomStagePawn::PollInput(float Dt)
 	bAPrev = bA; bBPrev = bB;
 
 	// X (face-button left) = cycle the NirA representation: 0 high-res FBX / 1 low-res FBX / 2 procedural
+	// In the MUTE MENU X is the shader toggle instead: full shaders <-> the flat stand-in.
 	const bool bX = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Left);
-	if (bX && !bXPrev) { NiraVersion = (NiraVersion + 1) % FMath::Max(NiraVersionCount, 1); }
+	if (bX && !bXPrev)
+	{
+		if (HUDMode == 2) { bSimpleShaders = !bSimpleShaders; ApplySimpleShaders(bSimpleShaders); }
+		else              { NiraVersion = (NiraVersion + 1) % FMath::Max(NiraVersionCount, 1); }
+	}
 	bXPrev = bX;
 
 	// Y (face-button top) = HUD cycle: default(clean) -> editorial HUD -> mute menu -> default.
@@ -859,6 +864,7 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("mute"),  FString::FromInt(StationMuteMask));      // perf-bisect: every node drops the same rows
 	Event.Parameters.Add(TEXT("hudm"),  FString::FromInt(HUDMode));              // Y-cycle state (clean / HUD / mute menu)
 	Event.Parameters.Add(TEXT("msel"),  FString::FromInt(MuteSel));              // menu cursor, so the wall highlights the same row
+	Event.Parameters.Add(TEXT("simp"),  FString::FromInt(bSimpleShaders ? 1 : 0)); // shader stand-in: every node must swap or the compare is meaningless
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
 }
 
@@ -898,6 +904,11 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	if (const FString* Lp = E.Parameters.Find(TEXT("lpit")))  LookPitch = FCString::Atof(**Lp);
 	if (const FString* Mu = E.Parameters.Find(TEXT("mute")))  StationMuteMask = FCString::Atoi(**Mu);   // ApplyStations below picks it up
 	if (const FString* Ms = E.Parameters.Find(TEXT("msel")))  MuteSel = FCString::Atoi(**Ms);
+	if (const FString* Sp = E.Parameters.Find(TEXT("simp")))
+	{
+		const bool bNewSimple = (FCString::Atoi(**Sp) != 0);
+		if (bNewSimple != bSimpleShaders) { bSimpleShaders = bNewSimple; ApplySimpleShaders(bSimpleShaders); }
+	}
 	if (const FString* Hm = E.Parameters.Find(TEXT("hudm")))
 	{
 		const int32 NewMode = FCString::Atoi(**Hm);
@@ -1519,6 +1530,78 @@ void AQZoomStagePawn::UpdateCH4Energy(float Dt)
 	}
 }
 
+void AQZoomStagePawn::ApplySimpleShaders(bool bOn)
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+
+	if (!bOn)
+	{
+		// restore, in the exact order things were saved
+		for (int32 c = 0; c < SimpleSavedComps.Num(); ++c)
+		{
+			UPrimitiveComponent* PC = SimpleSavedComps[c].Get();
+			if (!PC) continue;   // its level streamed out — nothing to restore, nothing leaked
+			const int32 Start = SimpleSavedStart[c];
+			const int32 End = (c + 1 < SimpleSavedStart.Num()) ? SimpleSavedStart[c + 1] : SimpleSavedMats.Num();
+			for (int32 i = Start; i < End; ++i)
+				PC->SetMaterial(i - Start, SimpleSavedMats[i]);
+		}
+		for (TWeakObjectPtr<UPrimitiveComponent>& V : SimpleHiddenVols)
+			if (UPrimitiveComponent* PC = V.Get()) PC->SetVisibility(true);
+		SimpleSavedComps.Reset(); SimpleSavedStart.Reset(); SimpleSavedMats.Reset(); SimpleHiddenVols.Reset();
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] shaders restored"));
+		return;
+	}
+
+	if (!SimpleShaderMaterial)
+		SimpleShaderMaterial = LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_QZ_SimpleShader.M_QZ_SimpleShader"));
+	if (!SimpleShaderMaterial)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] M_QZ_SimpleShader missing — run dev/qz_simple_shader_material.py"));
+		bSimpleShaders = false;
+		return;
+	}
+
+	SimpleSavedComps.Reset(); SimpleSavedStart.Reset(); SimpleSavedMats.Reset(); SimpleHiddenVols.Reset();
+	int32 NSwap = 0, NVol = 0;
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		// station heroes + everything attached to them — the same population ApplyStations drives
+		bool bStation = It->Tags.Contains(TAG_STATION);
+		if (!bStation)
+		{
+			AActor* P = It->GetAttachParentActor();
+			while (P && !bStation) { bStation = P->Tags.Contains(TAG_STATION); P = P->GetAttachParentActor(); }
+		}
+		if (!bStation) continue;
+		TArray<UPrimitiveComponent*> Prims;
+		It->GetComponents<UPrimitiveComponent>(Prims);
+		for (UPrimitiveComponent* PC : Prims)
+		{
+			if (PC->IsA<UHeterogeneousVolumeComponent>())
+			{
+				// no simple version of a ray-marcher exists — hiding it IS its simple version
+				if (PC->IsVisible()) { PC->SetVisibility(false); SimpleHiddenVols.Add(PC); ++NVol; }
+				continue;
+			}
+			if (!PC->IsA<UMeshComponent>()) continue;
+			const int32 N = PC->GetNumMaterials();
+			if (N == 0) continue;
+			SimpleSavedComps.Add(PC);
+			SimpleSavedStart.Add(SimpleSavedMats.Num());
+			for (int32 i = 0; i < N; ++i)
+			{
+				SimpleSavedMats.Add(PC->GetMaterial(i));
+				PC->SetMaterial(i, SimpleShaderMaterial);
+				++NSwap;
+			}
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] SIMPLE SHADERS: %d slot(s) swapped, %d volume(s) hidden"), NSwap, NVol);
+}
+
 void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 {
 	if (!bQuarkMotion) return;
@@ -1590,15 +1673,29 @@ void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 		Q[i]->GetRootComponent()->SetRelativeLocation(Pos[i]);
 	}
 
-	// ── the strings, rebuilt from where the quarks actually are ──────────────────────────
-	static const int32 EA[3] = { 0, 1, 2 };
-	static const int32 EB[3] = { 1, 2, 0 };
+	// ── the Y-junction: three strings meet at a shared centre, not at each other ─────────
+	// This is the physics, not a styling choice: in a baryon the three flux tubes join at a
+	// central STRING JUNCTION — they do not run quark to quark. The junction is pure
+	// computation, nothing renders it: the centroid of the live positions plus its own small
+	// wander on incommensurable frequencies, so the meeting point breathes instead of sitting
+	// nailed to the mathematical average. Three cords aiming at one moving point ARE the node.
+	const FVector HomeC = (QuarkHome[0] + QuarkHome[1] + QuarkHome[2]) / 3.f;
+	FVector J = (Pos[0] + Pos[1] + Pos[2]) / 3.f;
+	{
+		const float RJ = FMath::Max((QuarkHome[0] - HomeC).Size(), 1.f) * GluonJunctionWander;
+		J += FVector(RJ * FMath::Sin(QuarkClock * 1.41f),
+		             RJ * FMath::Sin(QuarkClock * 0.83f + 2.1f),
+		             RJ * FMath::Sin(QuarkClock * 1.07f + 4.2f));
+	}
+
+	// String e runs quark e -> junction. Orientation matters to the material: +Z (t=1) is the
+	// junction end, where M_QZ_QuarkFlux banks its glow, and t=0 tucks into the quark sphere.
 	for (int32 e = 0; e < 3; ++e)
 	{
 		AActor* Beam = G[e];
 		if (!Beam) continue;
-		const FVector A0 = Pos[EA[e]];
-		const FVector B0 = Pos[EB[e]];
+		const FVector A0 = Pos[e];
+		const FVector B0 = J;
 		const FVector D = B0 - A0;
 		const float Len = D.Size();
 		if (Len < 1.f) continue;
@@ -1615,7 +1712,9 @@ void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 		// a stretched spring or an electric field would — it stores more energy the longer it
 		// gets. Showing that as "brighter and angrier when pulled" is the one visual claim here
 		// that is actually the physics rather than a flourish.
-		const float Rest = FMath::Max((QuarkHome[EB[e]] - QuarkHome[EA[e]]).Size(), 1.f);
+		// Rest length is quark-home to junction-home — a third shorter than the old edge rest,
+		// so tension reads correctly against the Y geometry, not the retired triangle's.
+		const float Rest = FMath::Max((QuarkHome[e] - HomeC).Size(), 1.f);
 		const float Stretch = FMath::Clamp(Len / Rest, 0.25f, 3.f);
 		TArray<UPrimitiveComponent*> Prims;
 		Beam->GetComponents<UPrimitiveComponent>(Prims);
@@ -2904,7 +3003,8 @@ void AQZoomStagePawn::UpdateReadout()
 				Handover.IsValidIndex(i) ? *Handover[i].Name.ToString() : TEXT("?"),
 				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"));
 		}
-		Menu += TEXT("\n\n[A] mute   [B] alle an   [DPad] waehlen");
+		Menu += FString::Printf(TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [DPad] waehlen"),
+			bSimpleShaders ? TEXT("EINFACH") : TEXT("voll"));
 		Readout->SetText(FText::FromString(Menu));
 		return;
 	}
@@ -3069,7 +3169,10 @@ void AQZoomStagePawn::SetupAccentMesh(UStaticMeshComponent* M, TObjectPtr<UMater
 			M->SetMaterial(0, MID);
 		}
 	}
-	M->SetVisibility(true);
+	// This unconditional show ran AFTER the BeginPlay clean-mode apply and quietly re-enabled the
+	// hairlines every session — the bShowHUDLines gate in SetCleanMode never stood a chance. The
+	// only callers are the three line meshes, so the gate belongs here too.
+	M->SetVisibility(bShowHUDLines);
 }
 
 void AQZoomStagePawn::LayoutInterface()

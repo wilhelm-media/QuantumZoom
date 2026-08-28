@@ -508,6 +508,9 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="4.0")) float QuarkSpeed = 0.5f;
 	/** Extra brightness per unit of stretch: 0 = a dumb line, high = confinement made obvious. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="6.0")) float GluonTension = 2.4f;
+	/** How far the (invisible) string junction wanders off the live centroid, as a fraction of the
+	 *  triad's rest radius. 0 = nailed to the average, which reads as mechanical. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="0.5")) float GluonJunctionWander = 0.12f;
 	/** String thickness, in the beam mesh's own local units. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.005", ClampMax="1.0")) float GluonThickness = 0.075f;
 	float QuarkClock = 0.f;
@@ -1356,6 +1359,25 @@ private:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0", ClampMax="2"))
 	int32 HUDMode = 0;
 	int32 MuteSel = 0;           // menu cursor, cluster-synced so the wall shows the same row
+
+	/** Mute-menu [X]: swap every station material for one flat unlit opaque. The second axis of
+	 *  the bisect — muting rows asks "which STATION costs", this asks "is it the SHADERS at all":
+	 *  frame rate jumps on toggle = shader cost; stays put = geometry/overdraw/volumes. The
+	 *  heterogeneous volumes are hidden while on (a ray-marcher has no simple version), Niagara
+	 *  is left alone, and station fades stop landing (their DMIs are unbound) — diagnostic mode,
+	 *  not show mode. Everything restores exactly on toggle-off. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bSimpleShaders = false;
+	/** The stand-in. Auto-loaded from M_QZ_SimpleShader if unset. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect")
+	TObjectPtr<UMaterialInterface> SimpleShaderMaterial;
+	// flat save-state: strong refs on the materials (a swapped-out DMI has no other owner and
+	// would be GC'd before restore), weak on the components (a streamed-out level must not leak)
+	UPROPERTY() TArray<TObjectPtr<UMaterialInterface>> SimpleSavedMats;
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> SimpleSavedComps;
+	TArray<int32> SimpleSavedStart;
+	TArray<TWeakObjectPtr<UPrimitiveComponent>> SimpleHiddenVols;
+	void ApplySimpleShaders(bool bOn);
 
 	float OrbitYaw = 0.f, OrbitPitch = 0.f, ZoomVel = 0.f;
 	float PrevZoom = 0.f;      // for a cluster-consistent visual velocity (ZoomProgress delta, valid on every node)
