@@ -1024,6 +1024,8 @@ private:
 	UPROPERTY() TObjectPtr<USceneComponent>      Root = nullptr;
 	UPROPERTY() TObjectPtr<UCameraComponent>     Camera = nullptr;
 	UPROPERTY() TObjectPtr<UTextRenderComponent> Readout = nullptr;
+	/** The frame-rate, at 3x the readout size — legible from across the room while bisecting. */
+	UPROPERTY() TObjectPtr<UTextRenderComponent> FpsBig = nullptr;
 	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailTitle = nullptr;
 	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailSub = nullptr;
 	UPROPERTY() TObjectPtr<UTextRenderComponent> DetailScale = nullptr;
@@ -1379,6 +1381,13 @@ private:
 	 *  reactivates a muted system; cluster-synced. */
 	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
 	bool bParticlesMuted = false;
+	/** Mute-menu [D-Pad Left] / [LB]: the CH4 station split in two — the ANIMATION (the wrapper
+	 *  tagged QZBisectAnim: molecules, oxygen, its particles) and the NirA (everything else on
+	 *  that station's row) mute independently, so the bisect can name which half costs. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bAnimMuted = false;
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bNirAMuted = false;
 	/** The stand-in. Auto-loaded from M_QZ_SimpleShader if unset. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect")
 	TObjectPtr<UMaterialInterface> SimpleShaderMaterial;

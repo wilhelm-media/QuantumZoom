@@ -77,6 +77,12 @@ AQZoomStagePawn::AQZoomStagePawn()
 		T->SetVerticalAlignment(EVRTA_TextCenter);
 		return T;
 	};
+	// The big frame-rate: its own component because a TextRender has ONE size for all its text —
+	// the number must be readable from across the room while the finger is on the mute keys.
+	FpsBig = MakeText(TEXT("FpsBig"));
+	FpsBig->SetVerticalAlignment(EVRTA_TextBottom);
+	FpsBig->SetTextRenderColor(FColor(255, 171, 46));
+
 	DetailIndex = MakeText(TEXT("DetailIndex"));
 	DetailTitle = MakeText(TEXT("DetailTitle"));
 	DetailSub   = MakeText(TEXT("DetailSub"));
@@ -206,7 +212,7 @@ void AQZoomStagePawn::BeginPlay()
 		// A material without the parameter just ignores the write — nothing depends on the patch
 		// script having run.
 		if (!TextMID) TextMID = UMaterialInstanceDynamic::Create(ReadoutMaterial, this);
-		for (UTextRenderComponent* T : { Readout, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv })
+		for (UTextRenderComponent* T : { Readout, FpsBig, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv })
 			if (T) T->SetTextMaterial(TextMID ? (UMaterialInterface*)TextMID : ReadoutMaterial.Get());
 	}
 	if (Readout) Readout->SetTextRenderColor(TextColor.ToFColor(true));   // constant readout uses the interface colour
@@ -219,7 +225,7 @@ void AQZoomStagePawn::BeginPlay()
 	// Excluding them from the PP presets: they are Unlit + depth-test-off, so lighting/shadows already miss
 	// them; the remaining grade (tonemap/color) is applied to the whole frame — the honest way to exempt HUD
 	// from that is a separate post-tonemap pass, which TextRender can't do alone. Flagged below.
-	for (UTextRenderComponent* T : { Readout, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv })
+	for (UTextRenderComponent* T : { Readout, FpsBig, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv })
 	{
 		if (!T) continue;
 		// Mark every HUD glyph for the post-tonemap restore. Writing custom depth is what puts
@@ -706,6 +712,12 @@ void AQZoomStagePawn::PollInput(float Dt)
 			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] particles %s"),
 				bParticlesMuted ? TEXT("MUTED") : TEXT("on"));
 		}
+		if (bLf && !bLeftPrev)
+		{
+			bAnimMuted = !bAnimMuted;
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] animation %s"),
+				bAnimMuted ? TEXT("MUTED") : TEXT("on"));
+		}
 	}
 	else
 	{
@@ -723,9 +735,18 @@ void AQZoomStagePawn::PollInput(float Dt)
 	const bool bLB = PC->IsInputKeyDown(EKeys::Gamepad_LeftShoulder) || PC->IsInputKeyDown(EKeys::Q);
 	if (bLB && !bLBPrev)
 	{
-		const int32 N = FMath::Max(StyleLightLadder.Num(), 1);
-		StyleLightStep = (StyleLightStep + 1) % N;
-		ApplyStyleLight();
+		if (HUDMode == 2)   // in the MUTE MENU LB is the NirA half of the bisect split
+		{
+			bNirAMuted = !bNirAMuted;
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] NirA %s"),
+				bNirAMuted ? TEXT("MUTED") : TEXT("on"));
+		}
+		else
+		{
+			const int32 N = FMath::Max(StyleLightLadder.Num(), 1);
+			StyleLightStep = (StyleLightStep + 1) % N;
+			ApplyStyleLight();
+		}
 	}
 	bLBPrev = bLB;
 
@@ -874,6 +895,8 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("c4p"),   FString::SanitizeFloat(CH4Phase));         // the reaction clock: floor + wall must scrub the same frame
 	Event.Parameters.Add(TEXT("c4r"),   FString::FromInt(bCH4Running ? 1 : 0));
 	Event.Parameters.Add(TEXT("pmut"),  FString::FromInt(bParticlesMuted ? 1 : 0)); // particle bisect axis: all nodes drop them together
+	Event.Parameters.Add(TEXT("amut"),  FString::FromInt(bAnimMuted ? 1 : 0));      // CH4 split: the animation half
+	Event.Parameters.Add(TEXT("nmut"),  FString::FromInt(bNirAMuted ? 1 : 0));      // CH4 split: the NirA half
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
 }
 
@@ -931,6 +954,8 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	// a toggle STATE, not an integrated clock — the primary's self-echo carries the same value,
 	// so applying it everywhere is idempotent (unlike c4p, which oscillated)
 	if (const FString* Pm = E.Parameters.Find(TEXT("pmut"))) bParticlesMuted = (FCString::Atoi(**Pm) != 0);
+	if (const FString* Am = E.Parameters.Find(TEXT("amut"))) bAnimMuted = (FCString::Atoi(**Am) != 0);
+	if (const FString* Nm = E.Parameters.Find(TEXT("nmut"))) bNirAMuted = (FCString::Atoi(**Nm) != 0);
 	if (const FString* Hm = E.Parameters.Find(TEXT("hudm")))
 	{
 		const int32 NewMode = FCString::Atoi(**Hm);
@@ -1902,7 +1927,7 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 					// gate composes with the STATION's own visibility — never activate something
 					// the station loop just hid because the viewer is elsewhere on the bar
 					const bool bOn = IntroFade > 0.002f && CH4Fade > 0.002f && !bParticlesMuted;
-					if (!bOn && NC->IsActive())      NC->Deactivate();
+					if (!bOn && NC->IsActive())      NC->DeactivateImmediate();
 					else if (bOn && !NC->IsActive()) NC->Activate(true);
 				}
 			}
@@ -2143,8 +2168,66 @@ void AQZoomStagePawn::ApplyStations()
 			SetStationFade(A, 0.f);                                            // masked dissolve -> invisible
 			for (AActor* Ch : Attached) SetStationFade(Ch, 0.f);
 		}
+		else
+		{
+			// THE OFF-TRANSITION WAS DEAD CODE. SetStationFade — and with it the Niagara
+			// deactivation gate — only ran in the bVis branch, so a station leaving the band
+			// took its particle systems with it VISUALLY but never stopped their simulation.
+			// The quark sea (unbounded lifetimes) then grew, hidden, from the first visit to
+			// the end of the session: the permanent slide to 30 fps that survived zooming out.
+			// Not visible -> not simulating. No exceptions (Michael's words).
+			auto KillFx = [](AActor* Act)
+			{
+				TArray<UNiagaraComponent*> NCs;
+				Act->GetComponents<UNiagaraComponent>(NCs);
+				for (UNiagaraComponent* NC : NCs)
+					if (NC->IsActive()) NC->DeactivateImmediate();
+			};
+			KillFx(A);
+			for (AActor* Ch : Attached) KillFx(Ch);
+		}
 	}
 	if (WarmupLeft > 0) --WarmupLeft;
+
+	// ── PERF BISECT: the CH4 station split in two, muted independently ──────────────────────────
+	// Runs AFTER the main loop (which re-shows everything each frame), so this pass wins. The
+	// ANIMATION half is the subtree under the QZBisectAnim-tagged wrapper; the NIRA half is the
+	// rest of that station's row. Niagara is deactivated as well — a hidden system still costs
+	// its simulation, and the whole point here is to make the cost leave the frame.
+	if (bAnimMuted || bNirAMuted)
+	{
+		TSet<AActor*> Anim;
+		for (TActorIterator<AActor> It2(W); It2; ++It2)
+		{
+			if (!It2->Tags.Contains(FName(TEXT("QZBisectAnim")))) continue;
+			Anim.Add(*It2);
+			TArray<AActor*> Sub;
+			It2->GetAttachedActors(Sub, true, /*recursive=*/true);
+			for (AActor* S : Sub) Anim.Add(S);
+		}
+		const FName RowName(*FString::FromInt(CH4Station));
+		for (TActorIterator<AActor> It2(W); It2; ++It2)
+		{
+			AActor* A2 = *It2;
+			const bool bInAnim = Anim.Contains(A2);
+			bool bMute = bAnimMuted && bInAnim;
+			if (!bMute && bNirAMuted && !bInAnim)
+			{
+				AActor* P = A2;   // NirA = anything whose ancestry reaches the CH4 station root
+				while (P)
+				{
+					if (P->Tags.Contains(TAG_STATION) && P->Tags.Contains(RowName)) { bMute = true; break; }
+					P = P->GetAttachParentActor();
+				}
+			}
+			if (!bMute) continue;
+			A2->SetActorHiddenInGame(true);
+			TArray<UNiagaraComponent*> NCs;
+			A2->GetComponents<UNiagaraComponent>(NCs);
+			for (UNiagaraComponent* NC : NCs)
+				if (NC->IsActive()) NC->DeactivateImmediate();
+		}
+	}
 }
 
 void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
@@ -2163,7 +2246,7 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// activation, so nothing else can switch a muted system back on.
 			if (bParticlesMuted)
 			{
-				if (NC->IsActive()) NC->Deactivate();
+				if (NC->IsActive()) NC->DeactivateImmediate();
 				continue;
 			}
 			// User.StationFade — bind it to alpha in the system and the emitter dissolves with
@@ -2202,7 +2285,11 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// Tie it to the fade instead, which also stops it simulating while off screen.
 			const bool bWantOn = Fade > 0.002f;
 			if (bWantOn && !NC->IsActive())       NC->Activate(true);   // true = reset, so it restarts cleanly
-			else if (!bWantOn && NC->IsActive())  NC->Deactivate();
+			// IMMEDIATE, not graceful: Deactivate() lets live particles finish, and a system with
+			// long or infinite lifetimes (the quark sea) never finishes — it kept simulating,
+			// invisible, for the rest of the session. That was the permanent frame-rate drop
+			// after the quark station had been visited once.
+			else if (!bWantOn && NC->IsActive())  NC->DeactivateImmediate();
 			// One line per Niagara component, the first time each is written. "No particles"
 			// has three causes that look identical — never reached, reached with fade 0, or
 			// reached and the system ignores the parameter — and only the first two are mine.
@@ -2624,7 +2711,7 @@ void AQZoomStagePawn::SetCleanMode(bool bOn)
 {
 	// Clean plates for photography: hide the whole editorial HUD. UpdateReadout/UpdateInfoLayer only push
 	// text + colour (never visibility), so a hidden component stays hidden — nothing re-shows it each frame.
-	UTextRenderComponent* Texts[] = { Readout, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv };
+	UTextRenderComponent* Texts[] = { Readout, FpsBig, DetailIndex, DetailTitle, DetailSub, DetailScale, DetailProv };
 	for (UTextRenderComponent* T : Texts) if (T) T->SetVisibility(!bOn);
 	UStaticMeshComponent* Rules[] = { ReadoutBar, ReadoutBarFill, DetailRule };
 	for (UStaticMeshComponent* M : Rules) if (M) M->SetVisibility(!bOn && bShowHUDLines);
@@ -3068,6 +3155,18 @@ void AQZoomStagePawn::UpdateReadout()
 {
 	if (!Readout) return;
 
+	// The BIG frame-rate: menu always shows it; the editorial HUD shows it with bShowFPS; clean
+	// mode hides it via SetCleanMode's text array like everything else. Visibility is set here
+	// (every frame) only for the two live modes, so the clean-mode hide is never overridden.
+	if (FpsBig)
+	{
+		const bool bWant = !bCleanMode && (HUDMode == 2 || (HUDMode == 1 && bShowFPS));
+		if (FpsBig->IsVisible() != bWant) FpsBig->SetVisibility(bWant);
+		if (bWant)
+			FpsBig->SetText(FText::FromString(FString::Printf(TEXT("%.0f | %.0f"),
+				FpsCurrent, FpsMedian)));
+	}
+
 	// ── MUTE MENU (HUDMode 2): the readout becomes the bisect panel. FPS is forced on here —
 	// the menu exists to watch frame time against the station list, so hiding it behind bShowFPS
 	// would defeat the mode. Early return: the editorial text below has no business overwriting this.
@@ -3087,9 +3186,12 @@ void AQZoomStagePawn::UpdateReadout()
 				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"));
 		}
 		Menu += FString::Printf(
-			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s   [DPad] waehlen"),
+			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s")
+			TEXT("\n[<] anim: %s   [LB] nira: %s   [DPad hoch/runter] waehlen"),
 			bSimpleShaders ? TEXT("EINFACH") : TEXT("voll"),
-			bParticlesMuted ? TEXT("AUS") : TEXT("an"));
+			bParticlesMuted ? TEXT("AUS") : TEXT("an"),
+			bAnimMuted ? TEXT("AUS") : TEXT("an"),
+			bNirAMuted ? TEXT("AUS") : TEXT("an"));
 		Readout->SetText(FText::FromString(Menu));
 		return;
 	}
@@ -3276,6 +3378,12 @@ void AQZoomStagePawn::LayoutInterface()
 	DetailOffset  = FVector(UIDepth,  UIMarginRight, UIMarginUp);
 
 	if (Readout) { Readout->SetRelativeLocation(ReadoutOffset); Readout->SetWorldSize(ReadoutSize); }
+	if (FpsBig)
+	{
+		// above the readout column, left-anchored to the same margin
+		FpsBig->SetRelativeLocation(ReadoutOffset + FVector(0.f, 0.f, ReadoutSize * 2.0f));
+		FpsBig->SetWorldSize(ReadoutSize * 3.0f);
+	}
 
 	// ── the caption's vertical rhythm ────────────────────────────────────────────────────────
 	// Every line is a multiple of DetailSize, so DetailSize alone scales the block. The old ladder
