@@ -56,14 +56,20 @@ TSharedRef<SWidget> UQTitleCard::RebuildWidget()
 void UQTitleCard::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
-
+	if (bExternallyDriven) return;      // the hosting actor owns the clock
 	Elapsed += InDeltaTime;
-
 	if (Elapsed >= Total)
 	{
 		RemoveFromParent();
 		return;
 	}
+	ApplyPhase(Elapsed);
+}
+
+bool UQTitleCard::ApplyPhase(float InElapsed)
+{
+	Elapsed = InElapsed;
+	if (Elapsed >= Total) return true;
 
 	// Compute per-phase progress
 	float BgAlpha;       // background color alpha (1 = fully opaque, 0 = scene revealed)
@@ -110,4 +116,5 @@ void UQTitleCard::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 		SubtitleTextBlock->SetColorAndOpacity(
 			FSlateColor(FLinearColor(SubtitleColor.R, SubtitleColor.G, SubtitleColor.B, TextAlpha)));
 	}
+	return false;
 }

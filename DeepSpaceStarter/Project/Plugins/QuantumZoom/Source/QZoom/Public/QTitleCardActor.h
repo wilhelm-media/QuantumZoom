@@ -20,7 +20,9 @@ class QZOOM_API AQTitleCardActor : public AActor
 	GENERATED_BODY()
 
 public:
+	AQTitleCardActor();
 	virtual void BeginPlay() override;
+	virtual void Tick(float Dt) override;
 
 	UPROPERTY(EditAnywhere, Category="QTitleCard")
 	FText Title = FText::FromString(TEXT("QUANTUM ZOOM"));
@@ -49,7 +51,23 @@ public:
 	UPROPERTY(EditAnywhere, Category="QTitleCard|Colors")
 	FLinearColor StartColor = FLinearColor(0.f, 0.f, 0.f, 1.f);
 
+	/** ═══ STEREO. AddToViewport painted the card at SCREEN depth — identical in both eyes, zero
+	 *  parallax, which on the Deep Space wall reads as "not stereo" (it wasn't). The card now
+	 *  lives on a world-space widget plane at a real distance in front of the show camera, so it
+	 *  has depth like everything else, and the grade applies to it (neutral P0 at the start). ═══ */
+
+	/** How far in front of the show camera the card plane hangs. Comfortable stereo depth. */
+	UPROPERTY(EditAnywhere, Category="QTitleCard|Display", meta=(ClampMin="100.0"))
+	float CardDistance = 120.f;
+
+	/** World height of the plane. Default fills the wall frustum at CardDistance with margin. */
+	UPROPERTY(EditAnywhere, Category="QTitleCard|Display", meta=(ClampMin="50.0"))
+	float CardHeight = 260.f;
+
 private:
 	UPROPERTY()
 	TObjectPtr<UQTitleCard> TitleWidget;
+	UPROPERTY()
+	TObjectPtr<class UWidgetComponent> CardComp;
+	float CardElapsed = 0.f;
 };

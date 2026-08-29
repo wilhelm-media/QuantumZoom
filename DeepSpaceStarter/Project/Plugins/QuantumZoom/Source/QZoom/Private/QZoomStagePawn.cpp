@@ -19,6 +19,8 @@
 #include "LevelSequencePlayer.h"
 #include "Engine/PostProcessVolume.h"
 #include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetMaterialLibrary.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "DisplayClusterRootActor.h"   // free-look drives the DCRA in a cluster (nDisplay frustum source)
 #include "Camera/PlayerCameraManager.h"
 #include "IDisplayCluster.h"
@@ -422,6 +424,27 @@ void AQZoomStagePawn::EndPlay(const EEndPlayReason::Type Reason)
 void AQZoomStagePawn::Tick(float Dt)
 {
 	Super::Tick(Dt);
+#if WITH_EDITOR
+	// EDITOR WORLD: the only job is sequencer-scrub feedback — mirror the MPC's orbital_noise
+	// into every Niagara so the curve is authored against live particles. The show logic below
+	// must never run outside a game world (ApplyStations would rearrange the open level).
+	if (GetWorld() && !GetWorld()->IsGameWorld())
+	{
+		if (M169MPC)
+		{
+			const float ON = UKismetMaterialLibrary::GetScalarParameterValue(
+				this, M169MPC, TEXT("orbital_noise"));
+			for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+			{
+				TArray<UNiagaraComponent*> NCs;
+				It->GetComponents<UNiagaraComponent>(NCs);
+				for (UNiagaraComponent* NC : NCs)
+					NC->SetVariableFloat(OrbitalNoiseParam, ON);
+			}
+		}
+		return;
+	}
+#endif
 	if (bIsPrimary)
 	{
 		PollInput(Dt);
@@ -435,7 +458,14 @@ void AQZoomStagePawn::Tick(float Dt)
 	const double GapMs = (LastFrameEnd > 0.0) ? (TickT0 - LastFrameEnd) * 1000.0 : 0.0;
 
 	const double B0 = FPlatformTime::Seconds();
-	BuildMaterialCache();   // no-op once every station's DMIs are cached (cheap count check while streaming)
+	{
+		const int32 PrevStations = MatCacheStations;
+		BuildMaterialCache();   // no-op once every station's DMIs are cached (cheap count check while streaming)
+		// ON SITE the show STREAMS its stations — a station arriving after the [X] toggle kept its
+		// full shaders and the "simple" compare silently measured a mixed frame. New arrivals now
+		// join the running diagnosis (the apply is re-entrant and skips what is already swapped).
+		if (bSimpleShaders && MatCacheStations > PrevStations) ApplySimpleShaders(true);
+	}
 	const double B1 = FPlatformTime::Seconds();
 	ApplyStations();    // every node (secondaries got ZoomProgress/orbit via the event)
 	const double B2 = FPlatformTime::Seconds();
@@ -549,6 +579,37 @@ void AQZoomStagePawn::Tick(float Dt)
 		UE_LOG(LogTemp, Warning,
 			TEXT("[QZoomHitch] frame %.1f ms = pawn %.2f (cache %.2f, stations %.2f) + OUTSIDE %.1f  | zoom %.0f%% warm %d"),
 			FrameMs, TickMs, (B1 - B0) * 1000.0, (B2 - B1) * 1000.0, GapMs, ZoomProgress * 100.f, WarmupLeft);
+	}
+}
+
+void AQZoomStagePawn::ToggleSim8K()
+{
+	bSim8K = !bSim8K;
+	IConsoleVariable* SP = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage"));
+	if (!SP) return;
+	if (bSim8K)
+	{
+		FVector2D VP(1920, 1080);
+		if (GEngine && GEngine->GameViewport && GEngine->GameViewport->Viewport)
+		{
+			const FIntPoint P = GEngine->GameViewport->Viewport->GetSizeXY();
+			if (P.X > 0 && P.Y > 0) VP = FVector2D(P.X, P.Y);
+		}
+		// enough percentage that internal pixels reach the wall's 7680x4320
+		Sim8KPct = FMath::Clamp(FMath::CeilToInt(
+			100.f * FMath::Sqrt(33177600.f / float(VP.X * VP.Y))), 100, 400);
+		SP->Set(float(Sim8KPct));
+		UE_LOG(LogTemp, Warning,
+			TEXT("[QZoomPerf] SIM 8K: ScreenPercentage %d%% on a %.0fx%.0f window ")
+			TEXT("(~%.1f MPix internal; the wall's stereo adds ~x1.9 on top)"),
+			Sim8KPct, VP.X, VP.Y,
+			VP.X * VP.Y * FMath::Square(Sim8KPct / 100.f) / 1e6f);
+	}
+	else
+	{
+		SP->Set(100.f);
+		Sim8KPct = 0;
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] SIM 8K off"));
 	}
 }
 
@@ -667,6 +728,14 @@ void AQZoomStagePawn::PollInput(float Dt)
 			IdlePhase = 0.f;
 			IdlePitchPrev = 0.f;
 		}
+	}
+
+	// ── PERF BISECT: 0 = simulate the wall's pixel load (also R3 inside the menu) ───────────────────
+	{
+		const bool bZero = PC->IsInputKeyDown(EKeys::Zero);
+		static bool bZeroPrev = false;
+		if (bZero && !bZeroPrev) ToggleSim8K();
+		bZeroPrev = bZero;
 	}
 
 	// ── PERF BISECT: 1-9 toggle-mute ladder rows 0-8 ────────────────────────────────────────────────────
@@ -845,7 +914,11 @@ void AQZoomStagePawn::PollInput(float Dt)
 	//   3 = FORCE full Nanite (should look BEST — if this fixes it, we bake it into the packaged config)
 	// The current mode is shown in the HUD (NaniteDiag) so it's readable on the wall.
 	const bool bR3 = PC->IsInputKeyDown(EKeys::Gamepad_RightThumbstick);
-	if (bR3 && !bNaniteDiagPrev)
+	if (bR3 && !bNaniteDiagPrev && HUDMode == 2)
+	{
+		ToggleSim8K();   // in the MUTE MENU R3 is the 8K simulation; Nanite diag stays outside
+	}
+	else if (bR3 && !bNaniteDiagPrev)
 	{
 		// The PRIMARY steps the counter here; Broadcast() sends 'nan' and every node applies the cvar in
 		// OnClusterEvent so wall + floor stay in lock-step. The primary must ALSO apply it locally right now:
@@ -1611,7 +1684,9 @@ void AQZoomStagePawn::ApplySimpleShaders(bool bOn)
 		return;
 	}
 
-	SimpleSavedComps.Reset(); SimpleSavedStart.Reset(); SimpleSavedMats.Reset(); SimpleHiddenVols.Reset();
+	// NO reset here: the restore path clears the arrays, so they are empty on a fresh engage —
+	// and a RE-ENTRANT call (a station streamed in while the mode is on) must append, not wipe
+	// the originals it still owes the earlier components.
 	int32 NSwap = 0, NVol = 0;
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
@@ -1636,6 +1711,9 @@ void AQZoomStagePawn::ApplySimpleShaders(bool bOn)
 			if (!PC->IsA<UMeshComponent>()) continue;
 			const int32 N = PC->GetNumMaterials();
 			if (N == 0) continue;
+			// already wearing the stand-in (re-entrant streaming pass) -> recording it again
+			// would save the stand-in as the "original" and make restore a no-op
+			if (PC->GetMaterial(0) == SimpleShaderMaterial) continue;
 			SimpleSavedComps.Add(PC);
 			SimpleSavedStart.Add(SimpleSavedMats.Num());
 			for (int32 i = 0; i < N; ++i)
@@ -1804,6 +1882,28 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 	// could not be replayed on cue. RB starts and stops it; holding RB ramps the speed. The
 	// station fade still governs VISIBILITY — the molecules belong to that stage — but no longer
 	// governs the clock.
+	// AUTO-START: the reaction fires itself the first time the dive crosses CH4AutoStartAt.
+	// Latched with 2% hysteresis so retreating and diving again replays it; RB stays the
+	// manual override. Primary only — bCH4Running rides the cluster event to the others.
+	if (CH4AutoStartAt > 0.01f && (bIsPrimary || !bInCluster))
+	{
+		if (ZoomProgress >= CH4AutoStartAt && !bCH4AutoLatch)
+		{
+			bCH4AutoLatch = true;
+			if (!bCH4Running)
+			{
+				bCH4Running = true;
+				CH4Phase = 0.f;   // clean intro every arrival
+				UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] reaction AUTO-START at %.0f%%"),
+					ZoomProgress * 100.f);
+			}
+		}
+		else if (ZoomProgress < CH4AutoStartAt - 0.02f)
+		{
+			bCH4AutoLatch = false;
+		}
+	}
+
 	const bool bStationUp = bCH4Running;
 	// THE CLOCK ADVANCES ON THE PRIMARY ONLY. CH4Phase rides the cluster event (c4p) to every
 	// other node — the floor is a separate node where RB is never pressed, so advancing locally
@@ -2275,6 +2375,14 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// brightness: P5 multiplies green by 0.02, so no amount of gain rescues a green
 			// particle — it is being removed by the grade rather than dimmed by it.
 			NC->SetVariableLinearColor(FName(TEXT("ParticleColor")), ParticleColor);
+
+			// User.OrbitalNoise mirrors the MPC's 'orbital_noise' scalar, so the SEQUENCER curve
+			// (which can only key material collections) reaches the particle systems too — the
+			// movement calms down when the story deactivates a molecule. Systems without the
+			// parameter ignore the write.
+			if (M169MPC)
+				NC->SetVariableFloat(OrbitalNoiseParam,
+					UKismetMaterialLibrary::GetScalarParameterValue(this, M169MPC, TEXT("orbital_noise")));
 
 			// ACTIVATE IT. The census said active=0, visible=1 — the component was reached and
 			// written to, and simply was not playing. Nothing in the pawn ever activated a
@@ -3187,11 +3295,12 @@ void AQZoomStagePawn::UpdateReadout()
 		}
 		Menu += FString::Printf(
 			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s")
-			TEXT("\n[<] anim: %s   [LB] nira: %s   [DPad hoch/runter] waehlen"),
+			TEXT("\n[<] anim: %s   [LB] nira: %s   [0] 8K-SIM: %s   [DPad hoch/runter] waehlen"),
 			bSimpleShaders ? TEXT("EINFACH") : TEXT("voll"),
 			bParticlesMuted ? TEXT("AUS") : TEXT("an"),
 			bAnimMuted ? TEXT("AUS") : TEXT("an"),
-			bNirAMuted ? TEXT("AUS") : TEXT("an"));
+			bNirAMuted ? TEXT("AUS") : TEXT("an"),
+			bSim8K ? *FString::Printf(TEXT("%d%% (+Stereo ~x1.9)"), Sim8KPct) : TEXT("aus"));
 		Readout->SetText(FText::FromString(Menu));
 		return;
 	}

@@ -16,6 +16,13 @@ public:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
+	/** Drives the fade from OUTSIDE (the hosting actor's tick). A widget inside a
+	 *  WidgetComponent does not get NativeTick — the first stereo card froze on its opaque
+	 *  frame-0 state forever, textless, because nothing ever advanced it. Returns true when
+	 *  the card is finished and the host should hide it. */
+	bool ApplyPhase(float InElapsed);
+	bool bExternallyDriven = false;
+
 	FText Title    = FText::FromString(TEXT("QUANTUM ZOOM"));
 	FText Subtitle = FText::FromString(TEXT("ARS ELECTRONICA DEEP SPACE 8K"));
 

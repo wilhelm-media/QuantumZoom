@@ -203,6 +203,7 @@ class UStaticMeshComponent;
 class UStaticMesh;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class UMaterialParameterCollection;
 class USoundBase;
 class UAudioComponent;
 class UPointLightComponent;   // the CH4 energy light lives on the pawn
@@ -1019,6 +1020,10 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void Tick(float Dt) override;
+	/** Editor ticks too — ONLY to mirror the sequencer-scrubbed MPC 'orbital_noise' into the
+	 *  particle systems, so the curve is authorable with live feedback. Everything else in Tick
+	 *  early-outs for non-game worlds. */
+	virtual bool ShouldTickIfViewportsOnly() const override { return true; }
 
 private:
 	UPROPERTY() TObjectPtr<USceneComponent>      Root = nullptr;
@@ -1140,6 +1145,21 @@ private:
 	 *  station dissolve. At phase 0 (stopped) they are fully eroded away. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.1", ClampMax="20.0"))
 	float CH4IntroFadeSeconds = 3.f;
+	/** The reaction starts ITSELF when the dive first crosses this depth (0 = off, RB only).
+	 *  Latched: re-arms when the zoom retreats 2% below, so backing out and diving again
+	 *  replays the intro. RB keeps working as the manual override either way. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float CH4AutoStartAt = 0.72f;
+	bool bCH4AutoLatch = false;
+	/** The M169 collection — the pawn mirrors its 'orbital_noise' scalar into every Niagara
+	 *  User.OrbitalNoise each frame, so the Sequencer curve drives the particle movement. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	TObjectPtr<UMaterialParameterCollection> M169MPC;
+	/** The Niagara USER variable that receives the MPC's orbital_noise. Must match the system's
+	 *  REAL variable name (check the Parameters panel — a renamed display can hide an internal
+	 *  'NiagaraFloat_0'). Editable so a mismatch is a Details-panel fix, not a rebuild. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4")
+	FName OrbitalNoiseParam = TEXT("OrbitalNoise");
 	float CH4SpeedNow = 1.f;     // eased speed multiplier: 1 normally, CH4SpeedMax while held
 	bool bAPrev  = false, bBPrev  = false;                                            // A/B density latches
 	int32 NiraVersion = 1;   // S2 NirA representation: 0 high-res FBX / 1 low-res FBX (default) / 2 procedural / 3 hull
@@ -1388,6 +1408,17 @@ private:
 	bool bAnimMuted = false;
 	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
 	bool bNirAMuted = false;
+
+	/** Key 0: SIMULATE THE WALL. Raises r.ScreenPercentage so the internal render hits 7680x4320
+	 *  — the Deep Space wall's true pixel load — inside whatever window is open (a 1080p window
+	 *  needs exactly the 400% engine maximum). Pixel-bound costs (overdraw, heavy per-pixel
+	 *  materials: the structure, the cell, the net under the drill) then show their on-site
+	 *  weight locally; game-thread costs are unaffected, which is itself diagnostic. Stereo is
+	 *  a further ~x1.9 on top that cannot be simulated — factor it mentally. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bSim8K = false;
+	int32 Sim8KPct = 0;          // the percentage actually applied (clamped at the engine's 400)
+	void ToggleSim8K();          // key 0 anywhere, R3 inside the mute menu
 	/** The stand-in. Auto-loaded from M_QZ_SimpleShader if unset. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect")
 	TObjectPtr<UMaterialInterface> SimpleShaderMaterial;
