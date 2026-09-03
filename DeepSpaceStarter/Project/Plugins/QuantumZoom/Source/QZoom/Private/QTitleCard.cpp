@@ -6,8 +6,10 @@
 
 TSharedRef<SWidget> UQTitleCard::RebuildWidget()
 {
-	const FSlateFontInfo TitleFont = FCoreStyle::GetDefaultFontStyle("Bold", 96);
-	const FSlateFontInfo SubFont   = FCoreStyle::GetDefaultFontStyle("Regular", 24);
+	const FSlateFontInfo TitleFont = FCoreStyle::GetDefaultFontStyle(
+		"Bold", FMath::Max(TitleFontSize, 8.f));
+	const FSlateFontInfo SubFont = FCoreStyle::GetDefaultFontStyle(
+		"Regular", FMath::Max(SubtitleFontSize, 6.f));
 
 	TSharedRef<SVerticalBox> Content = SNew(SVerticalBox);
 
@@ -28,7 +30,7 @@ TSharedRef<SWidget> UQTitleCard::RebuildWidget()
 		Content->AddSlot()
 		.AutoHeight()
 		.HAlign(HAlign_Center)
-		.Padding(FMargin(0.f, 18.f, 0.f, 0.f))
+		.Padding(FMargin(0.f, FMath::Max(SubtitleGap, 0.f), 0.f, 0.f))
 		[
 			SAssignNew(SubtitleTextBlock, STextBlock)
 			.Font(SubFont)
@@ -97,12 +99,16 @@ bool UQTitleCard::ApplyPhase(float InElapsed)
 		TextAlpha = 1.f - t;
 	}
 
-	// Background: lerp StartColor → BackgroundColor (RGB), then scale alpha for fade-out
-	if (RootBorder.IsValid() && bShowBackground)
+	// Background: lerp StartColor → BackgroundColor (RGB), then scale alpha for fade-out.
+	// Computed UNCONDITIONALLY and published, because the background is no longer necessarily
+	// painted by this widget: the surround sphere reads CurrentBackground from here every frame.
 	{
 		const FLinearColor BgRGB = FMath::Lerp(StartColor, BackgroundColor, BgLerp);
-		const FLinearColor BgEff(BgRGB.R, BgRGB.G, BgRGB.B, BgRGB.A * BgAlpha);
-		RootBorder->SetBorderBackgroundColor(FSlateColor(BgEff));
+		CurrentBackground = FLinearColor(BgRGB.R, BgRGB.G, BgRGB.B, BgRGB.A * BgAlpha);
+	}
+	if (RootBorder.IsValid() && bShowBackground)
+	{
+		RootBorder->SetBorderBackgroundColor(FSlateColor(CurrentBackground));
 	}
 
 	// Text: keep target color, modulate alpha

@@ -23,11 +23,25 @@ public:
 	bool ApplyPhase(float InElapsed);
 	bool bExternallyDriven = false;
 
+	/** The background colour+alpha for the CURRENT phase, written by every ApplyPhase call
+	 *  whether or not this widget paints it. The surround sphere is the real background now
+	 *  (a plane cannot cover a wall AND a floor frustum), and it reads this. */
+	FLinearColor CurrentBackground = FLinearColor(0.f, 0.f, 0.f, 1.f);
+
 	FText Title    = FText::FromString(TEXT("QUANTUM ZOOM"));
 	FText Subtitle = FText::FromString(TEXT("ARS ELECTRONICA DEEP SPACE 8K"));
 
 	bool bShowBackground = true;
 	bool bShowText       = true;
+
+	/** Point sizes on the widget's own 7680x4320 canvas — NOT screen pixels. The canvas is mapped
+	 *  onto a world plane CardHeight tall, so a size here is a FRACTION OF THE PICTURE and stays
+	 *  true at any resolution or viewing distance. The original 96 was 2% of the canvas height,
+	 *  which is why the title read as a caption instead of a title. */
+	float TitleFontSize    = 240.f;
+	float SubtitleFontSize = 70.f;
+	/** Gap under the title, same canvas units. */
+	float SubtitleGap      = 55.f;
 
 	FLinearColor BackgroundColor = FLinearColor(0.0f, 0.01f, 0.06f, 1.f);
 	FLinearColor TitleColor      = FLinearColor(0.85f, 0.95f, 1.f, 1.f);

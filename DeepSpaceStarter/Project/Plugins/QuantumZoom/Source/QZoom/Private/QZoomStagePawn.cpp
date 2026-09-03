@@ -37,6 +37,8 @@
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "NiagaraComponent.h"
+#include "QHudText.h"
+#include "Blueprint/UserWidget.h"
 
 const FString AQZoomStagePawn::EventName = TEXT("QZoomStage.State");
 static const FName TAG_STATION(TEXT("QZStation"));
@@ -44,6 +46,18 @@ static const FName TAG_STATION(TEXT("QZStation"));
 static const FName TAG_RETIRED(TEXT("QZRetired"));
 // Authoring guides: visible in the editor so a stage can be aimed, never visible in the show.
 static const FName TAG_GUIDE(TEXT("QZGuide"));
+// A hand-authored Niagara system that keeps its OWN palette and sizes: the pawn still drives its
+// fade, its scale reference, its activation and OrbitalNoise, but leaves ParticleColor and the two
+// ParticleScale handles alone. Without this every system in a visible station is amber by frame 1.
+static const FName TAG_KEEPSTYLE(TEXT("QZKeepStyle"));
+// An actor that should turn WITH the free look. ApplyFreeLook rotates the DCRA, every named
+// viewpoint component and the PIE camera — but never the pawn, so anything parented to the pawn
+// stays put while the view swings away from it. A headlight has to travel with the look or it
+// lights the place you just stopped looking at.
+static const FName TAG_FOLLOWLOOK(TEXT("QZFollowLook"));
+// Nur diese Actors bekommen NetAmount von der Tiefe gefahren. M_NiraMaster traegt NetAmount
+// auch auf den Nukleonen; ohne die Eingrenzung wuerden deren authorierte Werte mitgerissen.
+static const FName TAG_NETSOLID(TEXT("QZNetSolid"));
 
 // The nominal span every hero is normalised to: 2 x E_TARGET 1732, the size Petri, Nidulans,
 // NirA and MET169 all sit at. It is the one number that turns a station's exp() scale back
@@ -387,6 +401,24 @@ void AQZoomStagePawn::BeginPlay()
 		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] HUD post-process exemption: material %s, stencil %d"),
 			HUDPostMaterial ? TEXT("loaded") : TEXT("MISSING — HUD will be graded"), HUDStencil);
 	}
+	// THE INTERFACE, in a pass the grade cannot reach. Created here rather than in the
+	// constructor: CreateWidget needs a PlayerController, and on a cluster secondary there may
+	// not be one — a null widget simply means the 3D fallback keeps working.
+	if (bHUDScreenSpace && !HudTextWidget)
+	{
+		if (APlayerController* HudPC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+		{
+			HudTextWidget = CreateWidget<UQHudText>(HudPC, UQHudText::StaticClass());
+			if (HudTextWidget)
+			{
+				HudTextWidget->AddToViewport(500);   // above everything the show draws
+				HudTextWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] screen-space HUD %s"),
+			HudTextWidget ? TEXT("created") : TEXT("FAILED (no PlayerController) — 3D text stays"));
+	}
+
 	ApplyPPPreset(PPPreset);
 	UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] PPVolume %s  (unbound=%d prio=%.0f enabled=%d)"),
 		PPVolume ? *PPVolume->GetName() : TEXT("FAILED — presets have no volume"),
@@ -464,7 +496,7 @@ void AQZoomStagePawn::Tick(float Dt)
 		// ON SITE the show STREAMS its stations — a station arriving after the [X] toggle kept its
 		// full shaders and the "simple" compare silently measured a mixed frame. New arrivals now
 		// join the running diagnosis (the apply is re-entrant and skips what is already swapped).
-		if (bSimpleShaders && MatCacheStations > PrevStations) ApplySimpleShaders(true);
+		if (ShaderLevel != 0 && MatCacheStations > PrevStations) ApplyShaderLevel(ShaderLevel);
 	}
 	const double B1 = FPlatformTime::Seconds();
 	ApplyStations();    // every node (secondaries got ZoomProgress/orbit via the event)
@@ -625,6 +657,12 @@ void AQZoomStagePawn::PollInput(float Dt)
 	if (PC->IsInputKeyDown(EKeys::W)) RT = FMath::Max(RT, 1.f);   // Up/Down freed for PP presets
 	if (PC->IsInputKeyDown(EKeys::S)) LT = FMath::Max(LT, 1.f);
 	float Target = (RT - LT) * BaseZoomRate;
+
+	// PACING — the chapter's duration. Multiplies the trigger rate and NOTHING else: no station
+	// moves, no band changes width, every depth ever dialled stays where it is. Only the seconds
+	// between them change. That is the whole point: the ladder is log-spaced by physics, so a
+	// chapter's WIDTH is not authorable, but its DURATION now is.
+	Target *= PaceAt(ZoomProgress);
 
 	// DETENTS — the script's [PAUSE] marks made physical. Near an authored depth the descent gets heavy,
 	// so the operator can settle on a beat and talk over it instead of fighting the trigger to hold still.
@@ -873,7 +911,7 @@ void AQZoomStagePawn::PollInput(float Dt)
 	const bool bX = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Left);
 	if (bX && !bXPrev)
 	{
-		if (HUDMode == 2) { bSimpleShaders = !bSimpleShaders; ApplySimpleShaders(bSimpleShaders); }
+		if (HUDMode == 2) { ShaderLevel = (ShaderLevel + 1) % 3; ApplyShaderLevel(ShaderLevel); }
 		else              { NiraVersion = (NiraVersion + 1) % FMath::Max(NiraVersionCount, 1); }
 	}
 	bXPrev = bX;
@@ -887,6 +925,7 @@ void AQZoomStagePawn::PollInput(float Dt)
 		HUDMode = (HUDMode + 1) % 3;
 		bCleanMode = (HUDMode == 0);
 		SetCleanMode(bCleanMode);
+		ApplyPPPreset(PPPreset);   // the menu suspends the grade terms it cannot be read through
 		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] HUD mode %d (%s)"), HUDMode,
 			HUDMode == 0 ? TEXT("clean") : HUDMode == 1 ? TEXT("HUD") : TEXT("MUTE MENU"));
 	}
@@ -932,8 +971,16 @@ void AQZoomStagePawn::PollInput(float Dt)
 	bNaniteDiagPrev = bR3;
 
 	// L3 (left-stick click) = freeze/resume the S3 oxidation ping-pong (hold a hero state for a photo).
+	// IN THE MUTE MENU it is the NANITE axis instead — mirroring R3, which is the 8K simulation there.
+	// The bisect menu needs Nanite as a switch and not only as the R3 proxy-render DIAGNOSTIC: those
+	// two answer different questions. The diagnostic asks "which Nanite path is the cluster taking";
+	// this asks "is Nanite the problem at all". Only turning it off answers the second one.
 	const bool bL3 = PC->IsInputKeyDown(EKeys::Gamepad_LeftThumbstick);
-	if (bL3 && !bL3Prev) { bOxFrozen = !bOxFrozen; }
+	if (bL3 && !bL3Prev)
+	{
+		if (HUDMode == 2) { bNaniteOff = !bNaniteOff; ApplyNaniteOff(); }
+		else              { bOxFrozen = !bOxFrozen; }
+	}
 	bL3Prev = bL3;
 }
 
@@ -964,12 +1011,14 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("mute"),  FString::FromInt(StationMuteMask));      // perf-bisect: every node drops the same rows
 	Event.Parameters.Add(TEXT("hudm"),  FString::FromInt(HUDMode));              // Y-cycle state (clean / HUD / mute menu)
 	Event.Parameters.Add(TEXT("msel"),  FString::FromInt(MuteSel));              // menu cursor, so the wall highlights the same row
-	Event.Parameters.Add(TEXT("simp"),  FString::FromInt(bSimpleShaders ? 1 : 0)); // shader stand-in: every node must swap or the compare is meaningless
+	Event.Parameters.Add(TEXT("simp"),  FString::FromInt(ShaderLevel));            // shader TIER 0/1/2: every node must swap or the compare is meaningless
 	Event.Parameters.Add(TEXT("c4p"),   FString::SanitizeFloat(CH4Phase));         // the reaction clock: floor + wall must scrub the same frame
 	Event.Parameters.Add(TEXT("c4r"),   FString::FromInt(bCH4Running ? 1 : 0));
 	Event.Parameters.Add(TEXT("pmut"),  FString::FromInt(bParticlesMuted ? 1 : 0)); // particle bisect axis: all nodes drop them together
 	Event.Parameters.Add(TEXT("amut"),  FString::FromInt(bAnimMuted ? 1 : 0));      // CH4 split: the animation half
 	Event.Parameters.Add(TEXT("nmut"),  FString::FromInt(bNirAMuted ? 1 : 0));      // CH4 split: the NirA half
+	Event.Parameters.Add(TEXT("noff"),  FString::FromInt(bNaniteOff ? 1 : 0));      // Nanite axis: a per-node cvar,
+	                                                                               // so every node must be told
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
 }
 
@@ -1011,8 +1060,10 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	if (const FString* Ms = E.Parameters.Find(TEXT("msel")))  MuteSel = FCString::Atoi(**Ms);
 	if (const FString* Sp = E.Parameters.Find(TEXT("simp")))
 	{
-		const bool bNewSimple = (FCString::Atoi(**Sp) != 0);
-		if (bNewSimple != bSimpleShaders) { bSimpleShaders = bNewSimple; ApplySimpleShaders(bSimpleShaders); }
+		// carries the TIER now, not a flag — 0/1/2. An older node sending 0/1 still lands on
+		// HIGH/MID, which is the closest honest reading of a two-state message.
+		const int32 NewLevel = FMath::Clamp(FCString::Atoi(**Sp), 0, 2);
+		if (NewLevel != ShaderLevel) { ShaderLevel = NewLevel; ApplyShaderLevel(ShaderLevel); }
 	}
 	// SECONDARIES ONLY — the same rule free-look follows. This receive also fires on the primary
 	// (self-loopback), and applying the echo there overwrote the live clock with last frame's
@@ -1029,6 +1080,14 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	if (const FString* Pm = E.Parameters.Find(TEXT("pmut"))) bParticlesMuted = (FCString::Atoi(**Pm) != 0);
 	if (const FString* Am = E.Parameters.Find(TEXT("amut"))) bAnimMuted = (FCString::Atoi(**Am) != 0);
 	if (const FString* Nm = E.Parameters.Find(TEXT("nmut"))) bNirAMuted = (FCString::Atoi(**Nm) != 0);
+	// r.Nanite is a PER-NODE console variable, so a bisect that only switched the primary would
+	// compare a Nanite wall against a fallback floor and prove nothing. Applied unconditionally
+	// (idempotent), same reasoning as the diagnostic above.
+	if (const FString* No = E.Parameters.Find(TEXT("noff")))
+	{
+		bNaniteOff = (FCString::Atoi(**No) != 0);
+		ApplyNaniteOff();
+	}
 	if (const FString* Hm = E.Parameters.Find(TEXT("hudm")))
 	{
 		const int32 NewMode = FCString::Atoi(**Hm);
@@ -1037,6 +1096,9 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 			HUDMode = NewMode;
 			bCleanMode = (HUDMode == 0);
 			SetCleanMode(bCleanMode);
+			// Same suspension on every node, or the wall reads its menu through a vignette the
+			// floor no longer has — and a bisect compared across two different grades is noise.
+			ApplyPPPreset(PPPreset);
 		}
 	}
 	if (!bIsPrimary) ApplyFreeLook(LookYaw, LookPitch);   // primary already applied it in PollInput this frame
@@ -1650,12 +1712,12 @@ void AQZoomStagePawn::UpdateCH4Energy(float Dt)
 	}
 }
 
-void AQZoomStagePawn::ApplySimpleShaders(bool bOn)
+void AQZoomStagePawn::ApplyShaderLevel(int32 Level)
 {
 	UWorld* W = GetWorld();
 	if (!W) return;
 
-	if (!bOn)
+	if (Level <= 0)
 	{
 		// restore, in the exact order things were saved
 		for (int32 c = 0; c < SimpleSavedComps.Num(); ++c)
@@ -1669,25 +1731,33 @@ void AQZoomStagePawn::ApplySimpleShaders(bool bOn)
 		}
 		for (TWeakObjectPtr<UPrimitiveComponent>& V : SimpleHiddenVols)
 			if (UPrimitiveComponent* PC = V.Get()) PC->SetVisibility(true);
-		SimpleSavedComps.Reset(); SimpleSavedStart.Reset(); SimpleSavedMats.Reset(); SimpleHiddenVols.Reset();
-		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] shaders restored"));
+		SimpleSavedComps.Reset(); SimpleSavedStart.Reset(); SimpleSavedMats.Reset();
+		SimpleSavedIndex.Reset(); SimpleHiddenVols.Reset();
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] shaders restored (HIGH)"));
 		return;
 	}
 
-	if (!SimpleShaderMaterial)
+	if (Level >= 2 && !SimpleShaderMaterial)
 		SimpleShaderMaterial = LoadObject<UMaterialInterface>(nullptr,
 			TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/M_QZ_SimpleShader.M_QZ_SimpleShader"));
-	if (!SimpleShaderMaterial)
+	if (Level >= 2 && !SimpleShaderMaterial)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] M_QZ_SimpleShader missing — run dev/qz_simple_shader_material.py"));
-		bSimpleShaders = false;
+		ShaderLevel = 0;
 		return;
 	}
 
+	// The MID lookup, built once per call. Keyed on the ORIGINAL material, so it survives the
+	// component already wearing something else — the originals are what we record and restore.
+	TMap<UMaterialInterface*, UMaterialInterface*> Low;
+	if (Level == 1)
+		for (const FQZLowShader& S : LowShaders)
+			if (S.From && S.To) Low.Add(S.From, S.To);
+
 	// NO reset here: the restore path clears the arrays, so they are empty on a fresh engage —
-	// and a RE-ENTRANT call (a station streamed in while the mode is on) must append, not wipe
-	// the originals it still owes the earlier components.
-	int32 NSwap = 0, NVol = 0;
+	// and a RE-ENTRANT call (a station streamed in, or a tier change) must keep the originals it
+	// still owes the components it already recorded.
+	int32 NSwap = 0, NVol = 0, NKept = 0;
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
 		// station heroes + everything attached to them — the same population ApplyStations drives
@@ -1704,27 +1774,69 @@ void AQZoomStagePawn::ApplySimpleShaders(bool bOn)
 		{
 			if (PC->IsA<UHeterogeneousVolumeComponent>())
 			{
-				// no simple version of a ray-marcher exists — hiding it IS its simple version
-				if (PC->IsVisible()) { PC->SetVisibility(false); SimpleHiddenVols.Add(PC); ++NVol; }
+				// no simple version of a ray-marcher exists — hiding it IS its simple version.
+				// LOW only: at MID the scene must still contain what it contains, or the tier
+				// compares two different pictures instead of two shader costs.
+				if (Level >= 2 && PC->IsVisible())
+				{ PC->SetVisibility(false); SimpleHiddenVols.Add(PC); ++NVol; }
 				continue;
 			}
 			if (!PC->IsA<UMeshComponent>()) continue;
 			const int32 N = PC->GetNumMaterials();
 			if (N == 0) continue;
-			// already wearing the stand-in (re-entrant streaming pass) -> recording it again
-			// would save the stand-in as the "original" and make restore a no-op
-			if (PC->GetMaterial(0) == SimpleShaderMaterial) continue;
-			SimpleSavedComps.Add(PC);
-			SimpleSavedStart.Add(SimpleSavedMats.Num());
-			for (int32 i = 0; i < N; ++i)
+
+			// RECORD ONCE. The originals belong to the first time this component is seen; every
+			// later pass reads them back out. Recording what a component currently wears would
+			// save a stand-in as the "original" and turn restore into a no-op.
+			int32* Found = SimpleSavedIndex.Find(PC);
+			int32 Start;
+			if (Found)
 			{
-				SimpleSavedMats.Add(PC->GetMaterial(i));
-				PC->SetMaterial(i, SimpleShaderMaterial);
-				++NSwap;
+				Start = SimpleSavedStart[*Found];
+			}
+			else
+			{
+				SimpleSavedIndex.Add(PC, SimpleSavedComps.Num());
+				SimpleSavedComps.Add(PC);
+				Start = SimpleSavedMats.Num();
+				SimpleSavedStart.Add(Start);
+				for (int32 i = 0; i < N; ++i) SimpleSavedMats.Add(PC->GetMaterial(i));
+			}
+
+			for (int32 i = 0; i < N && (Start + i) < SimpleSavedMats.Num(); ++i)
+			{
+				UMaterialInterface* Orig = SimpleSavedMats[Start + i];
+				UMaterialInterface* Want = SimpleShaderMaterial;
+				if (Level == 1)
+				{
+					// WALK THE PARENT CHAIN. What sits in a slot at runtime is almost never the
+					// asset the table was built from: BuildMaterialCache replaces every slot with
+					// a DYNAMIC instance so the station fade has something to write to. A direct
+					// lookup therefore missed every single entry — the table was correct and the
+					// tier still did nothing. The authored material is that DMI's parent (or its
+					// parent's parent), so climb until an entry matches.
+					UMaterialInterface** Sub = nullptr;
+					for (UMaterialInterface* Key = Orig; Key && !Sub; )
+					{
+						Sub = Low.Find(Key);
+						if (Sub) break;
+						UMaterialInstance* MI = Cast<UMaterialInstance>(Key);
+						Key = MI ? MI->Parent : nullptr;
+					}
+					// A material with no light version stays as it is. Substituting the flat
+					// stand-in instead would quietly turn MID into LOW for that slot and the
+					// measurement would mean nothing.
+					Want = Sub ? *Sub : Orig;
+					if (!Sub) ++NKept;
+				}
+				if (PC->GetMaterial(i) != Want) { PC->SetMaterial(i, Want); ++NSwap; }
 			}
 		}
 	}
-	UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] SIMPLE SHADERS: %d slot(s) swapped, %d volume(s) hidden"), NSwap, NVol);
+	static const TCHAR* Names[3] = { TEXT("HIGH"), TEXT("MID"), TEXT("LOW") };
+	UE_LOG(LogTemp, Warning,
+		TEXT("[QZoomPerf] SHADERS %s: %d slot(s) swapped, %d kept (no light version), %d volume(s) hidden"),
+		Names[FMath::Clamp(Level, 0, 2)], NSwap, NKept, NVol);
 }
 
 void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
@@ -2222,7 +2334,25 @@ void AQZoomStagePawn::ApplyStations()
 			// a size, and separating them is what lets the back half of the dive be halved without
 			// any of its handovers moving.
 			const float RS = S * StationSizeMul(N);
-			A->SetActorTransform(FTransform(Orbit, Anchor, FVector(RS)));   // children follow via attachment
+			// ENTRY SQUASH. The one place a station's scale can stop being isotropic — a round
+			// volume arriving inside a flat cap must otherwise poke through it. Inert unless a row
+			// authors a window, and GateScale below deliberately keeps the UNIFORM number: the
+			// camera-dissolve bubble measures distance, which has no axes.
+			FVector ScaleVec(RS);
+			FVector Place = Anchor;
+			if (Handover.IsValidIndex(N) && Handover[N].EntryScaleTo > Handover[N].EntryScaleFrom)
+			{
+				const FQZHandover& H = Handover[N];
+				float t = FMath::Clamp((ZoomProgress - H.EntryScaleFrom)
+				                       / FMath::Max(H.EntryScaleTo - H.EntryScaleFrom, 1e-4f), 0.f, 1.f);
+				t = t * t * (3.f - 2.f * t);
+				ScaleVec *= FMath::Lerp(H.EntryScale, FVector::OneVector, t);
+				// The nudge rides the SAME curve and dies with it, so the station still ends up
+				// exactly on the anchor — the displacement belongs to the arrival, not to the
+				// station's place in the world.
+				Place += Orbit.RotateVector(H.EntryOffset * (1.f - t));
+			}
+			A->SetActorTransform(FTransform(Orbit, Place, ScaleVec));   // children follow via attachment
 			// The camera-dissolve bubble has to grow with the world. PixelDepth is in world units
 			// and the station's world size is 3464*S, so a FIXED 120 uu bubble is 3.5% of the
 			// object at S=1 and 0.3% at S=11 — which is why the mushroom never opened: standing
@@ -2367,14 +2497,65 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// background glow that has to be ~40x larger before it is visible at all. A single
 			// shared size cannot serve both: at the value that makes the glow read, the particles
 			// are enormous. Published separately so each keeps its own tuning.
+			//
+			// OPT-OUT. These three are the pawn's SHOW STYLE, not its plumbing: they exist so one
+			// set of shoulder buttons can re-tune every system at once and so nothing dies under
+			// P5. A system authored for one station with its own palette does not want them —
+			// writing them is how a hand-built look silently becomes amber. The tag QZKeepStyle on
+			// the actor keeps StationFade, StationScale, the activation gate and OrbitalNoise (the
+			// plumbing, which every system needs) and skips only the three style writes.
+			const bool bKeepStyle = A->Tags.Contains(TAG_KEEPSTYLE);
 			const float PScaleMul = bParticleScaleTracksZoom ? FMath::Max(GateScale, 1e-4f) : 1.f;
-			NC->SetVariableFloat(FName(TEXT("ParticleScale")),     ParticleScale     * PScaleMul);
-			NC->SetVariableFloat(FName(TEXT("ParticleGlowScale")), ParticleGlowScale * PScaleMul);
+			if (!bKeepStyle)
+			{
+				NC->SetVariableFloat(FName(TEXT("ParticleScale")),     ParticleScale     * PScaleMul);
+				NC->SetVariableFloat(FName(TEXT("ParticleGlowScale")), ParticleGlowScale * PScaleMul);
 
-			// User.ParticleColor. A colour, not a brightness, because the problem was never
-			// brightness: P5 multiplies green by 0.02, so no amount of gain rescues a green
-			// particle — it is being removed by the grade rather than dimmed by it.
-			NC->SetVariableLinearColor(FName(TEXT("ParticleColor")), ParticleColor);
+				// User.ParticleColor. A colour, not a brightness, because the problem was never
+				// brightness: P5 multiplies green by 0.02, so no amount of gain rescues a green
+				// particle — it is being removed by the grade rather than dimmed by it.
+				NC->SetVariableLinearColor(FName(TEXT("ParticleColor")), ParticleColor);
+			}
+
+			// ── COLOUR CHARGE ───────────────────────────────────────────────────────────
+			// One wheel, the three quarks a third of a turn apart — so the three colours are
+			// always all present, which is the only part of QCD this is actually quoting.
+			// The phase rides FillerSwirl because that clock is already broadcast to every node;
+			// a second synchronised clock would be a second thing to get out of step.
+			// Written outside the QZKeepStyle opt-out: these systems were built FOR this.
+			if (QuarkColorWheel.Num() >= 2)
+			{
+				int32 QIdx = -1;
+				for (AActor* P = A; P && QIdx < 0; P = P->GetAttachParentActor())
+				{
+					for (const FName& T : P->Tags)
+					{
+						const FString Ts = T.ToString();
+						if (Ts.StartsWith(TEXT("QZQuark")))
+						{
+							QIdx = FCString::Atoi(*Ts.Mid(7));
+							break;
+						}
+					}
+				}
+				if (QIdx >= 0)
+				{
+					static const FName ColNames[3] = { FName(TEXT("Color_1")),
+					                                   FName(TEXT("Color_2")),
+					                                   FName(TEXT("Color_3")) };
+					const int32 W   = QuarkColorWheel.Num();
+					const float Per = FMath::Max(QuarkColorPeriodDeg, 1.f);
+					const float Ph  = FMath::Fmod(FillerSwirl, Per) / Per;
+					for (int32 k = 0; k < 3; ++k)
+					{
+						const float t  = (Ph + (float)(QIdx + k) / 3.f) * (float)W;
+						const int32 i0 = ((int32)FMath::FloorToInt(t) % W + W) % W;
+						const int32 i1 = (i0 + 1) % W;
+						NC->SetVariableLinearColor(ColNames[k],
+							FMath::Lerp(QuarkColorWheel[i0], QuarkColorWheel[i1], FMath::Frac(t)));
+					}
+				}
+			}
 
 			// User.OrbitalNoise mirrors the MPC's 'orbital_noise' scalar, so the SEQUENCER curve
 			// (which can only key material collections) reaches the particle systems too — the
@@ -2447,8 +2628,16 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 				// Deliberately NOT smoothed the same way: multiplying a mask by a fade gives a
 				// hard-edged wipe rather than an eroding one. Curved so the surface holds until
 				// the fade is genuinely low instead of thinning out through the whole band.
+				// THE GAIN DECIDES WHEN THE UNIFORM WIPE TAKES OVER FROM THE EROSION.
+				// The masters are MASKED, so their clip threshold (0.333) is a hard step: the
+				// moment this multiplier pushes the mask under it, the WHOLE surface crosses at
+				// once. At the old 1.6 that happened at a fade of 0.21 — the erosion was still
+				// mid-sentence and the wipe cut it off. Higher gain holds the gate open longer,
+				// so the noise erosion stays the visible mechanism and the wipe only closes on
+				// something already nearly gone: 4.0 moves the crossing to a fade of 0.083.
 				DMI->SetScalarParameterValue(TEXT("StationDissolve"),
-				                             FMath::Clamp(Fade * 1.6f, 0.f, 1.f));
+				                             FMath::Clamp(Fade * FMath::Max(StationDissolveGain, 0.1f),
+				                                          0.f, 1.f));
 
 				// Bubble sized against the station currently being drawn.
 				const float G = FMath::Max(GateScale, 1e-4f);
@@ -2466,6 +2655,20 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 					FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(TunnelInnerDeg, 1.f, 89.f))));
 				DMI->SetScalarParameterValue(TEXT("TunnelOuterCos"),
 					FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(TunnelOuterDeg, 2.f, 180.f))));
+
+				// Das NirA-Netz schliesst sich ueber ein authoriertes Tiefenfenster. Bewusst an
+				// ZoomProgress und NICHT an Fade: Fade ist die Blende der Station und faellt an
+				// beiden Enden ab, das Netz soll aber monoton dichter werden, waehrend man
+				// hindurchfliegt. Der Tag grenzt es auf das Netz ein — dieselbe Zeile wuerde
+				// sonst NetAmount auf den Nukleonen ueberschreiben, die denselben Master teilen.
+				if (bNetSolidRamp && A->Tags.Contains(TAG_NETSOLID))
+				{
+					const float t = FMath::Clamp((ZoomProgress - NetSolidFrom)
+					                             / FMath::Max(NetSolidTo - NetSolidFrom, 1e-4f),
+					                             0.f, 1.f);
+					DMI->SetScalarParameterValue(TEXT("NetAmount"),
+						FMath::Lerp(NetAmountOpen, NetAmountSolid, t * t * (3.f - 2.f * t)));
+				}
 			}
 		}
 	}
@@ -2585,6 +2788,7 @@ void AQZoomStagePawn::UpdateLights()
 {
 	UWorld* W = GetWorld();
 	if (!W) return;
+	LightDbgCount = 0; LightDbgMax = 0.f; LightDbgTop.Reset();
 	// Fade every light that lives in a station sublevel by that station's current visibility, so lights ramp
 	// in/out with the scene instead of popping on when the sublevel streams in.
 	//
@@ -2619,20 +2823,52 @@ void AQZoomStagePawn::UpdateLights()
 		// rig genuinely serves all 13 decades; there is no per-scale lighting need. So an accent
 		// light should be able to live in the PERSISTENT level and still fade with its station.
 		// "QZLight<N>" does that, level-independently.
+		// THIRD ROUTE: an OWN DEPTH WINDOW, for a light that belongs to a moment rather than to a
+		// station. Tags QZLightOn<pct> / QZLightOff<pct>, e.g. QZLightOn5 + QZLightOff13 = on from
+		// 5% to 13% of the dive. The pawn's own headlamp is the case this exists for: it is not in
+		// any station sublevel and must not follow one — it belongs to "you are inside the
+		// mushroom", which is a stretch of the zoom bar and nothing else.
+		// Read BEFORE QZLight<N> and excluded from it, or Atoi("On5") would silently return 0 and
+		// bind the light to station 0.
+		float WinOn = -1.f, WinOff = -1.f;
 		int32 TagStation = -1;
 		for (const FName& T : A->Tags)
 		{
 			const FString Ts = T.ToString();
-			if (Ts.StartsWith(TEXT("QZLight")))
+			if (Ts.StartsWith(TEXT("QZLightOff")))     { WinOff = FCString::Atof(*Ts.Mid(10)) * 0.01f; }
+			else if (Ts.StartsWith(TEXT("QZLightOn"))) { WinOn  = FCString::Atof(*Ts.Mid(9))  * 0.01f; }
+			else if (Ts.StartsWith(TEXT("QZLight")) && TagStation < 0)
 			{
-				TagStation = FCString::Atoi(*Ts.Mid(7));
-				break;
+				const FString Rest = Ts.Mid(7);
+				if (!Rest.IsEmpty() && Rest.IsNumeric()) TagStation = FCString::Atoi(*Rest);
 			}
 		}
 
 		float Fade = 0.f;
 		int32 ScaleStation = TagStation;      // which station's SCALE this light should ride
-		if (TagStation >= 0)
+		if (WinOn >= 0.f || WinOff >= 0.f)
+		{
+			// The window governs WHEN. Whether the light also grows with the world is a separate
+			// question, and it is answered by whether the actor ALSO carries a QZLight<N> tag.
+			//
+			// Without one it stays a lamp on the rig: authored intensity, authored reach, fixed
+			// in world units. With one it borrows that station's scale for reach and intensity
+			// while keeping the window's timing — which is what a HEADLAMP needs. At 13% the lab
+			// renders at roughly ten times its authored size and at 17% at twenty; a fixed 6000
+			// units of reach then covers a tenth of the mushroom, and only the nearest part of it
+			// is lit. The light did not fail, it simply stayed the size it was told to be.
+			//
+			// Position is untouched either way: an attached light rides its parent, and the
+			// reposition below is skipped for attached actors.
+			const float A0 = (WinOn  >= 0.f) ? WinOn  : 0.f;
+			const float B0 = (WinOff >= 0.f) ? WinOff : 1.f;
+			const float Soft = FMath::Max(LightWindowSoft, 1e-3f);
+			const float g = FMath::Clamp((ZoomProgress - A0) / Soft, 0.f, 1.f)
+			              * FMath::Clamp((B0 - ZoomProgress) / Soft, 0.f, 1.f);
+			Fade = g * g * (3.f - 2.f * g);
+			ScaleStation = TagStation;   // -1 when no QZLight<N> tag: the old, unscaled behaviour
+		}
+		else if (TagStation >= 0)
 		{
 			// The value ApplyStations actually used this frame — not a re-derivation. The old binary test
 			// here read the GLOBAL MinVis/MaxVis and so ignored every per-station handover override.
@@ -2648,6 +2884,34 @@ void AQZoomStagePawn::UpdateLights()
 		{
 			continue;    // neither tagged nor in a tracked station level: a global light, leave it alone
 		}
+
+		// ── THE ONSET GATE ──────────────────────────────────────────────────────────
+		// Geometry and lighting want different clocks. A station has to dissolve in early and
+		// from a distance; its lamps belong to the moment you are INSIDE it. Tied to one fade,
+		// the cell's key light arrived at 14% with no geometry near it to catch — a lamp
+		// switching on in the void. This gate holds a station's lights back to an authored depth
+		// and swells them in from there. Smoothstepped: the cure must not be a second pop.
+		// Multiplies the LIGHT fade only; the scene's own dissolve is untouched.
+		if (Handover.IsValidIndex(ScaleStation) && Handover[ScaleStation].LightOnsetAt > 0.f)
+		{
+			const FQZHandover& H = Handover[ScaleStation];
+			const float g = FMath::Clamp((ZoomProgress - H.LightOnsetAt)
+			                             / FMath::Max(H.LightOnsetWidth, 1e-3f), 0.f, 1.f);
+			Fade *= g * g * (3.f - 2.f * g);
+		}
+
+		// ── THE HOLD ────────────────────────────────────────────────────────────────
+		// Applied AFTER the onset, because the two govern opposite ends: the onset decides when a
+		// station's lights may arrive, this decides that they need not leave with it. A rig can go
+		// on lighting what comes next long after its own geometry has handed over — the light
+		// belongs to the space, the mesh only to the chapter.
+		if (Handover.IsValidIndex(ScaleStation))
+		{
+			const FQZHandover& H = Handover[ScaleStation];
+			if (H.LightHoldFrom > 0.f && ZoomProgress >= H.LightHoldFrom)
+				Fade = FMath::Max(Fade, H.LightHoldLevel);
+		}
+
 		TArray<ULightComponent*> Lights;
 		A->GetComponents<ULightComponent>(Lights);
 		for (ULightComponent* LC : Lights)
@@ -2667,9 +2931,24 @@ void AQZoomStagePawn::UpdateLights()
 			                               / FMath::Max(LightFadeKnee, 0.01f), 0.f, 1.f);
 			// PROLONG the fade (Michael, 3x): ease the applied fade toward the station's target instead of
 			// snapping to it. LightFadeSpeed lower = slower ramp. Per-light smoothed value so each light lags.
+			// A station may slow its own fade-IN further via Handover.LightRiseMul; the fade-OUT
+			// deliberately ignores it (a slow rise reads as atmosphere, a slow exit reads as a bug).
+			float Spd = FMath::Max(LightFadeSpeed, 0.01f);
+			if (Lit > 0.f && Handover.IsValidIndex(ScaleStation))
+				Spd *= FMath::Max(Handover[ScaleStation].LightRiseMul, 0.05f);
 			float& sm = LightFadeSmoothed.FindOrAdd(Key);
-			sm = FMath::FInterpTo(sm, Lit, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f,
-			                      FMath::Max(LightFadeSpeed, 0.01f));
+			if (Lit < sm) Spd = FMath::Max(LightFadeSpeed, 0.01f);   // falling: shared speed
+			sm = FMath::FInterpTo(sm, Lit, GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f, Spd);
+			++LightDbgCount;
+			if (sm > LightDbgMax)
+			{
+				LightDbgMax = sm;
+#if WITH_EDITOR
+				LightDbgTop = A->GetActorLabel();
+#else
+				LightDbgTop = A->GetName();
+#endif
+			}
 			// intensity is written below, once the station's scale is known — see the
 			// inverse-square note there. Writing it here as well would be overwritten anyway.
 
@@ -2763,6 +3042,52 @@ void AQZoomStagePawn::ApplyNaniteDiag()
 		CV->Set(Modes[FMath::Clamp(NaniteDiagStep, 0, 2)], ECVF_SetByConsole);
 }
 
+float AQZoomStagePawn::PaceAt(float P) const
+{
+	// Empty curve = no pacing. The inert default, so adding this to a tuned show changes nothing
+	// until someone authors a point.
+	const int32 N = ZoomPace.Num();
+	if (N == 0) return 1.f;
+	if (N == 1) return FMath::Max(ZoomPace[0].Speed, ZoomPaceFloor);
+
+	// Before the first point and after the last, the curve holds its end value rather than
+	// falling off — a pacing curve that only covers the middle of the dive should leave the ends
+	// at their authored speed, not at zero.
+	if (P <= ZoomPace[0].Depth)       return FMath::Max(ZoomPace[0].Speed, ZoomPaceFloor);
+	if (P >= ZoomPace[N - 1].Depth)   return FMath::Max(ZoomPace[N - 1].Speed, ZoomPaceFloor);
+
+	for (int32 i = 0; i < N - 1; ++i)
+	{
+		const FQZPacePoint& A = ZoomPace[i];
+		const FQZPacePoint& B = ZoomPace[i + 1];
+		if (P >= A.Depth && P <= B.Depth)
+		{
+			const float d = B.Depth - A.Depth;
+			// Coincident or unsorted points would divide by ~0; fall back to the left value
+			// instead of producing an infinity that would freeze the trigger.
+			if (d <= 1e-5f) return FMath::Max(A.Speed, ZoomPaceFloor);
+			const float t = (P - A.Depth) / d;
+			return FMath::Max(FMath::Lerp(A.Speed, B.Speed, t), ZoomPaceFloor);
+		}
+	}
+	return 1.f;
+}
+
+void AQZoomStagePawn::ApplyNaniteOff()
+{
+	// THE HARD SWITCH, not the diagnostic. r.Nanite 0 takes the Nanite path out of the renderer
+	// entirely; every Nanite mesh then draws through its FALLBACK mesh, i.e. ordinary triangles.
+	// That is what makes it a valid bisect axis: the scene still renders, so the two frame rates
+	// are comparable, and the only variable is whether Nanite ran.
+	//
+	// Which is also why the fallback has to be CHEAP. A Nanite mesh whose LOD0 is a million
+	// triangles renders a million triangles the moment this is switched off — the axis would then
+	// measure the decimation, not Nanite.
+	if (IConsoleVariable* CV = IConsoleManager::Get().FindConsoleVariable(TEXT("r.Nanite")))
+		CV->Set(bNaniteOff ? 0 : 1, ECVF_SetByConsole);
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] Nanite %s"), bNaniteOff ? TEXT("OFF") : TEXT("on"));
+}
+
 void AQZoomStagePawn::ApplyStyleLight()
 {
 	ULightComponent* LC = GetStyleLight();
@@ -2785,7 +3110,24 @@ void AQZoomStagePawn::ApplyStyleLight()
 	float Target = StyleLightLadder[Step];
 	// OFF below the gate depth. The step itself is left alone, so LB still cycles and the
 	// operator's choice is waiting when the threshold is crossed.
-	if (bStyleLightZoomGate && ZoomProgress < StyleLightZoomOn) Target = 0.f;
+	// RAMP, not switch. Below ZoomOn the light is off; from there it swells to full at ZoomFull.
+	// A switch could only choose between arriving in an empty scene (the pop at 14%) and leaving
+	// the lab-to-cell stretch unlit (neither station owns a lamp). Growing with the dive is
+	// neither. Set ZoomFull <= ZoomOn and the old switch is back.
+	if (bStyleLightZoomGate)
+	{
+		const float A = StyleLightZoomOn;
+		const float B = StyleLightZoomFull;
+		if (B <= A)
+		{
+			if (ZoomProgress < A) Target = 0.f;
+		}
+		else
+		{
+			float g = FMath::Clamp((ZoomProgress - A) / (B - A), 0.f, 1.f);
+			Target *= g * g * (3.f - 2.f * g);
+		}
+	}
 	const bool  bRising = Target > StyleLightEased;
 	const float Speed   = bRising ? FMath::Max(StyleLightRiseSpeed, 0.01f)
 	                              : FMath::Max(StyleLightEaseSpeed, 0.01f);
@@ -3143,6 +3485,34 @@ void AQZoomStagePawn::ApplyFreeLook(float Yaw, float Pitch)
 	{
 		Camera->SetRelativeRotation(FRotator(Pitch, Yaw, 0.f));   // the PIE viewport
 	}
+
+	// ── ACTORS THAT TRAVEL WITH THE LOOK ────────────────────────────────────────
+	// Both POSITION and rotation, and position is the half that matters for a point light: a
+	// lamp above the camera lights the same sphere no matter where the camera faces, so only
+	// carrying its offset around the view axis makes it a headlight rather than a lamppost.
+	// The base offset is captured ONCE, against the camera — re-reading it each frame would
+	// compound the rotation and the actor would spiral away.
+	// Runs on every node: the primary calls this from PollInput, the secondaries from
+	// OnClusterEvent, so wall and floor carry the same offset.
+	if (UWorld* W2 = GetWorld())
+	{
+		const FVector Pivot = Camera ? Camera->GetComponentLocation() : GetActorLocation();
+		for (TActorIterator<AActor> It(W2); It; ++It)
+		{
+			AActor* A = *It;
+			if (!A->Tags.Contains(TAG_FOLLOWLOOK)) continue;
+			const TWeakObjectPtr<AActor> Key(A);
+			FVector* Off = LookFollowBaseOff.Find(Key);
+			if (!Off)
+			{
+				Off = &LookFollowBaseOff.Add(Key, A->GetActorLocation() - Pivot);
+				LookFollowBaseRot.Add(Key, A->GetActorRotation());
+			}
+			A->SetActorLocation(Pivot + Offset.RotateVector(*Off));
+			if (const FRotator* R = LookFollowBaseRot.Find(Key))
+				A->SetActorRotation((R->Quaternion() * Offset).Rotator());
+		}
+	}
 }
 
 void AQZoomStagePawn::UpdateGuides()
@@ -3281,27 +3651,35 @@ void AQZoomStagePawn::UpdateReadout()
 	if (HUDMode == 2)
 	{
 		FString Menu = FString::Printf(
-			TEXT("PERF BISECT                    [Y] weiter\nFPS        %.0f  |  median %.0f\nDEPTH      %.0f%%\n"),
-			FpsCurrent, FpsMedian, ZoomProgress * 100.f);
+			TEXT("PERF BISECT                    [Y] weiter\nFPS        %.0f  |  median %.0f\nDEPTH      %.0f%%   TEMPO %.2fx\n"),
+			FpsCurrent, FpsMedian, ZoomProgress * 100.f, PaceAt(ZoomProgress));
 		const int32 NRows = FMath::Clamp(StationCount, 1, 9);
 		for (int32 i = 0; i < NRows; ++i)
 		{
 			const bool bMuted = (StationMuteMask & (1 << i)) != 0;
 			const bool bRet   = Handover.IsValidIndex(i) && !Handover[i].bActive;
-			Menu += FString::Printf(TEXT("\n%s [%d] %-14s %s"),
+			// THE FADE, printed. Five rounds of "it is dark here" were answered by re-deriving
+			// band values on paper; every one of them could have been settled by reading the
+			// number the frame actually used. StationFadeCache IS that number.
+			const float F = StationFadeCache.IsValidIndex(i) ? StationFadeCache[i] : 0.f;
+			Menu += FString::Printf(TEXT("\n%s [%d] %-14s %-8s %.2f"),
 				(i == MuteSel) ? TEXT(">") : TEXT("  "), i + 1,
 				Handover.IsValidIndex(i) ? *Handover[i].Name.ToString() : TEXT("?"),
-				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"));
+				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"), F);
 		}
 		Menu += FString::Printf(
 			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s")
-			TEXT("\n[<] anim: %s   [LB] nira: %s   [0] 8K-SIM: %s   [DPad hoch/runter] waehlen"),
-			bSimpleShaders ? TEXT("EINFACH") : TEXT("voll"),
+			TEXT("\n[<] anim: %s   [LB] nira: %s   [R3] 8K-SIM: %s")
+			TEXT("\n[L3] NANITE: %s   [DPad hoch/runter] waehlen")
+			TEXT("\nLICHTER   %d aktiv, hellstes %.2f  (%s)   ENV %.2f"),
+			(ShaderLevel == 0) ? TEXT("HOCH") : (ShaderLevel == 1) ? TEXT("MITTEL") : TEXT("NIEDRIG"),
 			bParticlesMuted ? TEXT("AUS") : TEXT("an"),
 			bAnimMuted ? TEXT("AUS") : TEXT("an"),
 			bNirAMuted ? TEXT("AUS") : TEXT("an"),
-			bSim8K ? *FString::Printf(TEXT("%d%% (+Stereo ~x1.9)"), Sim8KPct) : TEXT("aus"));
-		Readout->SetText(FText::FromString(Menu));
+			bSim8K ? *FString::Printf(TEXT("%d%% (+Stereo ~x1.9)"), Sim8KPct) : TEXT("aus"),
+			bNaniteOff ? TEXT("AUS (Fallback-Mesh)") : TEXT("an"),
+			LightDbgCount, LightDbgMax, *LightDbgTop, EnvMul);
+		PushHudText(Menu);
 		return;
 	}
 	const float M     = CurrentScaleMeters();
@@ -3389,7 +3767,7 @@ void AQZoomStagePawn::UpdateReadout()
 		NanLine = FString::Printf(TEXT("\nNANITE     %s  |  FL %s  r.Nanite=%d  proxy=%d"),
 			NaniteNames[FMath::Clamp(NaniteDiagStep, 0, 2)], FLName, NaniteOn, ProxyMode);
 	}
-	Readout->SetText(FText::FromString(FString::Printf(
+	PushHudText(FString::Printf(
 		TEXT("OBSERVER   %s\nSPEED      %s /s\nZOOM       %s\nDEPTH      %.0f%%\nPRESET     %s @ %.0f%%\nFILLERS    %s  [%s]"
 		     "\nAUDIO      %d/%d live  |  peak %.2f  |  master %.2f%s%s%s%s%s"),
 		*FormatScale(ObserverSize), *FormatRate(ObserverSpeed), *FormatZoom(Power), ZoomProgress * 100.f,
@@ -3405,7 +3783,7 @@ void AQZoomStagePawn::UpdateReadout()
 		// spawned, tracks spawned but not playing, or playing and faded to nothing. These four
 		// numbers separate all three at a glance.
 		AudioLive, StageAudio.Num(), AudioPeak, MasterVolume,
-		*PalLine, *NanLine, *FpsLine, *FadeLine, *MuteLine)));
+		*PalLine, *NanLine, *FpsLine, *FadeLine, *MuteLine));
 
 	// Drive the progress FILL: grows from the fixed left end (ReadoutBarLeft) toward the right.
 	if (ReadoutBarFill)
@@ -3913,6 +4291,27 @@ void AQZoomStagePawn::UpdateAudio()
 	AudioPeak = Peak;
 }
 
+void AQZoomStagePawn::PushHudText(const FString& S)
+{
+	// ONE place decides what the interface says and where it is drawn. Both callers used to write
+	// straight into the 3D component; routing them through here is what makes the pass a single
+	// switch instead of two of them that can disagree.
+	if (bHUDScreenSpace && HudTextWidget)
+	{
+		HudTextWidget->SetLine(S, TextColor, HUDScreenFontSize, HUDScreenPadding);
+		HudTextWidget->SetVisibility(HUDMode == 0 ? ESlateVisibility::Collapsed
+		                                          : ESlateVisibility::HitTestInvisible);
+		// The 3D readout must go, or the same words are drawn twice — once graded and once not,
+		// which reads as a ghost rather than as text. The big FPS counter goes with it: it is
+		// anchored to the same corner and now lands ON the first lines, and its number is already
+		// in the FPS row above. Enforced every frame, because SetCleanMode re-shows them.
+		if (Readout && Readout->IsVisible()) Readout->SetVisibility(false);
+		if (FpsBig  && FpsBig->IsVisible())  FpsBig->SetVisibility(false);
+		return;
+	}
+	if (Readout) Readout->SetText(FText::FromString(S));
+}
+
 void AQZoomStagePawn::ApplyPPPreset(int32 P)
 {
 	if (!PPVolume) return;
@@ -3926,19 +4325,52 @@ void AQZoomStagePawn::ApplyPPPreset(int32 P)
 	auto Exp   = [&](float e){ S.bOverride_AutoExposureBias = true; S.AutoExposureBias = e; };
 	auto DOF   = [&](float f){ S.bOverride_DepthOfFieldFocalDistance = true; S.DepthOfFieldFocalDistance = Focal;
 	                            S.bOverride_DepthOfFieldFstop = true; S.DepthOfFieldFstop = f; };
-	auto Tint  = [&](float r, float g, float b){ S.bOverride_SceneColorTint = true; S.SceneColorTint = FLinearColor(r, g, b, 1.f); };
+	// PresetTintStrength lerps the authored tint toward WHITE — 1 = as authored, 0 = the grade
+	// keeps its exposure, contrast, bloom and vignette but stops recolouring. Applied here rather
+	// than at each case, so the GradeComp calculation below reads the value that actually shipped
+	// to the volume and the HUD compensation cannot drift out of step with it.
+	auto Tint  = [&](float r, float g, float b)
+	{
+		S.bOverride_SceneColorTint = true;
+		S.SceneColorTint = FMath::Lerp(FLinearColor::White, FLinearColor(r, g, b, 1.f),
+		                               FMath::Clamp(PresetTintStrength, 0.f, 1.f));
+	};
 	switch (P)
 	{
 	case 1: Bloom(1.6f); DOF(2.0f); Temp(7600.f); Sat(0.88f); Con(1.10f); Vig(0.50f); Exp( 0.3f); break;                    // P1 Cinematic — warm, glow, shallow DOF
 	case 2: Bloom(1.5f); Tint(1.0f, 0.22f, 0.18f); Temp(3200.f); Sat(1.30f); Con(1.28f); Vig(0.55f); Exp(0.1f); break;      // P2 Red Alert — crimson wash, warm, heavy vignette
 	case 3: Bloom(2.6f); DOF(1.4f); Temp(4400.f); Sat(0.70f); Con(1.20f); Vig(0.85f); Exp(-0.7f); break; // P3 Deep Space — dark, heavy bloom+DOF
 	case 4: Bloom(1.2f); DOF(1.8f); Temp(6200.f); Sat(1.55f); Con(1.15f); Vig(0.30f); Exp( 0.2f); break; // P4 Vivid — saturated showcase, mild DOF
-	case 5: Bloom(0.8f); Tint(0.40f, 0.02f, 0.02f); Temp(2600.f); Sat(0.90f); Con(1.60f); Vig(0.90f); Exp(-1.2f); break; // P5 Infrared — near-black crimson, crushed blacks
+	// P5 Infrared — SOFTENED. The old tint was (0.40, 0.02, 0.02): green and blue multiplied by a
+	// fiftieth. Gold (1.00, 0.85, 0.15) came out at (0.400, 0.017, 0.003) and white at
+	// (0.400, 0.020, 0.020) — the same red twice. The ratio between them was fine; the LEVEL was
+	// not. Both sat so far under the contrast pivot that Con 1.60 finished the job, so no material
+	// value could separate a golden sulfur from a white orbital: the grade had already thrown the
+	// information away before the material's choice ever mattered.
+	// Now G and B are lifted into a range the tonemapper can still resolve, and the contrast that
+	// was crushing them is eased. Gold lands at (0.45, 0.136, 0.015), white at (0.45, 0.16, 0.10)
+	// — same dominant red, but a blue channel that differs almost sevenfold and now survives.
+	// Still infrared in character: red dominates by roughly three to one.
+	case 5: Bloom(0.8f); Tint(0.45f, 0.16f, 0.10f); Temp(3400.f); Sat(0.95f); Con(1.30f); Vig(0.80f); Exp(-0.8f); break;
 	case 6: Bloom(3.0f); Tint(0.14f, 0.55f, 1.00f); Temp(9800.f); Sat(1.10f); Con(1.25f); Vig(0.20f); Exp( 0.5f); break; // P6 Cyanotype — icy blueprint blue, big glow
 	case 7: Bloom(4.0f); Sat(2.30f); Con(1.30f); Vig(0.00f); Exp( 1.2f); break;                                        // P7 Overdrive — blown-out neon, everything screaming
 	case 8: Bloom(0.0f); Sat(0.00f); Con(1.90f); Vig(0.95f); Exp(-0.2f); break;                                        // P8 Noir — hard black & white, heavy vignette
 	case 9: Bloom(2.6f); Tint(1.00f, 0.10f, 0.90f); Temp(5200.f); Sat(2.00f); Con(1.20f); Vig(0.35f); Exp( 0.3f); break; // P9 Psychedelic — magenta/green wash, max saturation
 	default: break;  // 0 neutral — no overrides at all, the raw look
+	}
+	// ── THE MENU MUST BE READABLE, and one grade term cannot be compensated away.
+	// GradeComp below pre-divides the text's emissive by the tint and the exposure, which is a
+	// CONSTANT PER CHANNEL — and that is enough for anything the grade does uniformly. The
+	// vignette is not uniform: it darkens by POSITION, hardest in the corners, which is exactly
+	// where the readout and the bisect menu live. No constant multiplier can beat a gradient.
+	// Bloom is the second one: text boosted a hundredfold to survive P5 smears into itself.
+	// So while the menu is open both are suspended. Colour, exposure and contrast stay, so the
+	// LOOK is still judgeable with the menu up — and their cost is a fixed full-screen pass
+	// either way, so a frame-time comparison made with the menu open stays comparable.
+	if (HUDMode == 2 && bMenuSuspendsVignette)
+	{
+		Vig(0.f);
+		Bloom(0.f);
 	}
 	PPVolume->Settings = S;
 	// Assigning a fresh FPostProcessSettings wiped WeightedBlendables, so if the (legacy, default-
@@ -3957,7 +4389,17 @@ void AQZoomStagePawn::ApplyPPPreset(int32 P)
 	{
 		const FLinearColor T = S.bOverride_SceneColorTint ? S.SceneColorTint : FLinearColor::White;
 		const float Ex = S.bOverride_AutoExposureBias ? FMath::Pow(2.f, S.AutoExposureBias) : 1.f;
-		auto Comp = [&](float c){ return FMath::Clamp(1.f / FMath::Max(c * Ex, 1e-3f), 1.f, TextCompMax); };
+		// OVERDRIVE AS AN EXPONENT, not a factor. The particles survive P5 by CARRYING HDR, and
+		// the text should do the same — but a flat multiplier would also blow the readout out on
+		// P0 neutral, where there is nothing to compensate. Raising the compensation to a power
+		// is inert exactly where the compensation is 1 (any preset that does not recolour) and
+		// bites hardest where the grade bites hardest. One number, no special cases.
+		auto Comp = [&](float c)
+		{
+			const float Need = 1.f / FMath::Max(c * Ex, 1e-3f);
+			return FMath::Clamp(FMath::Pow(Need, FMath::Max(TextGradeCompPower, 1.f)),
+			                    1.f, TextCompMax);
+		};
 		TextMID->SetVectorParameterValue(TEXT("GradeComp"),
 			FLinearColor(Comp(T.R), Comp(T.G), Comp(T.B), 1.f));
 	}
@@ -4131,9 +4573,15 @@ void AQZoomStagePawn::UpdateFillers(float Dt)
 	// MOLECULAR PRESENCE — the enzyme/protein medium belongs to the NirA neighbourhood, not the petri-dish
 	// scale. Ramp it up between the cell (S1) and NirA (S2), hold through MET169 (S3), fade out before the
 	// electron-density scale (S4). Outside that band the medium is absent (scale -> 0 + hidden).
-	const float c1 = StageCentre(1), c2 = StageCentre(2), c3 = StageCentre(3), c4 = StageCentre(4);
-	const float rise = FMath::Clamp((ZoomProgress - (c1 + c2) * 0.5f) / FMath::Max(c2 - (c1 + c2) * 0.5f, 1e-3f), 0.f, 1.f);
-	const float fall = FMath::Clamp(((c3 + c4) * 0.5f - ZoomProgress) / FMath::Max((c3 + c4) * 0.5f - c3, 1e-3f), 0.f, 1.f);
+	// The growth anchor below still reads the cell's centre — the medium's SIZE stays tied to the
+	// world's own curve, only its presence became authored.
+	const float c2 = StageCentre(2);
+	// AUTHORED, not derived. The band used to be read off the station centres, so it moved
+	// whenever the ladder moved and could not be dialled on its own. It is a dramatic decision.
+	const float rise = FMath::Clamp((ZoomProgress - FillerInAt)
+	                                / FMath::Max(FillerFullAt - FillerInAt, 1e-3f), 0.f, 1.f);
+	const float fall = FMath::Clamp((FillerGoneAt - ZoomProgress)
+	                                / FMath::Max(FillerGoneAt - FillerOutAt, 1e-3f), 0.f, 1.f);
 	float presence = FMath::Min(rise, fall);
 	presence = presence * presence * (3.f - 2.f * presence);   // smoothstep -> molecular-band opacity
 

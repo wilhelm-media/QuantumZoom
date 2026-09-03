@@ -64,6 +64,74 @@ struct FQZHandover
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="2.0"))
 	float GlobalLight = 1.f;
 
+	/** Multiplier on the light fade-IN speed for THIS station's lights (on top of the shared
+	 *  LightFadeSpeed). 1 = shared behaviour. LOWER = this station's lights take longer to
+	 *  arrive. Fade-OUT always keeps the shared speed — you arrive slowly, you leave normally.
+	 *  Born for the cell: "fade in cell light slower" (Markos) without dragging every other
+	 *  station's ramp with it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.05", ClampMax="5.0"))
+	float LightRiseMul = 1.f;
+
+	/** DEPTH AT WHICH THIS STATION'S LIGHTS ARE ALLOWED TO START, on the 0..1 zoom bar.
+	 *
+	 *  A station's lights have always followed its GEOMETRY fade, and those two want different
+	 *  timings. The scene has to dissolve in early and from far away — that is the handover. The
+	 *  lighting is a different statement: the cell's lamps belong to the moment you are INSIDE the
+	 *  cell, not to the moment the cell first shimmers into view at a distance. Tied together, the
+	 *  cell's key light arrived at 14% as a bright dot in empty space — no geometry near it yet to
+	 *  catch it, so it read as a lamp switching on in the void.
+	 *
+	 *  0 = no gate, lights follow the station fade exactly as before (every station's default, so
+	 *  nothing changes unless a row asks). Above 0, the lights stay fully dark until the dive
+	 *  reaches this depth and then swell in over LightOnsetWidth.
+	 *
+	 *  It is a DEPTH and not a scale on purpose: the HUD reads out the same number, so the value
+	 *  can be dialled by flying to the moment the hull passes the lens and reading it off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float LightOnsetAt = 0.f;
+
+	/** How much depth the onset takes to reach full. Smoothstepped, so it is a swell and never a
+	 *  switch — the gate must not trade one pop for another. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.005", ClampMax="0.5"))
+	float LightOnsetWidth = 0.04f;
+
+	/** ═══ ENTRY SQUASH — a NON-UNIFORM scale while a station arrives, easing back to round.
+	 *
+	 *  A station is placed with one number: FTransform(Orbit, Anchor, FVector(RenderScale)). It is
+	 *  therefore always isotropic — and a roughly round volume arriving inside a flat mushroom cap
+	 *  MUST stick out above and below it. No amount of retiming fixes that; it is a shape problem
+	 *  wearing a timing problem's clothes.
+	 *
+	 *  So the station may enter flattened to fit what contains it, and round out as that container
+	 *  dissolves. (1,1,1) = off, which is every row's default. ═══ */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage")
+	FVector EntryScale = FVector(1.f, 1.f, 1.f);
+
+	/** ENTRY NUDGE — a world-space displacement at the moment of entry, easing to zero on the
+	 *  SAME window as EntryScale. Squashing alone centres the flattened station on the anchor,
+	 *  which is not necessarily where the thing containing it is: a mushroom cap sits above the
+	 *  anchor, so a station that fits inside it by thickness can still sit below it. This moves
+	 *  the arrival without moving where the station ends up. Rotated by the orbit, so it turns
+	 *  with the world rather than sliding across it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage")
+	FVector EntryOffset = FVector::ZeroVector;
+
+	/** Depth at which the station is FULLY squashed, and the depth where it is round again.
+	 *  To <= From disables the whole thing, so an unauthored row is untouched. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float EntryScaleFrom = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float EntryScaleTo = 0.f;
+
+	/** ═══ LIGHT HOLD — from this depth on, this station's lights stop following its fade and stay
+	 *  at LightHoldLevel. A scene's light and a scene's geometry do not have to leave together:
+	 *  the NirA rig keeps lighting what comes after it, even once NirA itself has handed over.
+	 *  0 = off. ═══ */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float LightHoldFrom = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float LightHoldLevel = 1.f;
+
 	/** Use the timing values below. Off = the station uses the global StationZoomK / MinVis / fade values. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Handover") bool bEnabled = false;
 
@@ -131,6 +199,74 @@ struct FQZHandover
  * Stations differ by RHYTHM and DENSITY, never by being a different idea — that is what keeps
  * thirteen decades feeling like one continuous piece rather than seven unrelated effects.
  */
+/**
+ * FQZPacePoint — one control point of the ZOOM PACING curve.
+ *
+ * THE PROBLEM IT SOLVES. Every station's place on the 0..1 bar is derived from ScaleMeters, so
+ * the ladder is log-spaced by physics. A chapter's WIDTH on that bar is therefore not an
+ * authored quantity: widening one band narrows its neighbours, and the hundred percent is a
+ * zero-sum game. In a cutting room, "how long does the nucleus chapter last" would have nothing
+ * to do with how small a nucleus is. Here it did.
+ *
+ * This decouples the two WITHOUT touching the ladder. Nothing moves; only the SPEED at which the
+ * trigger carries you through a stretch changes. The nucleus keeps its five percent of the bar
+ * and takes twenty seconds instead of three. Perceived travel is time x visible change, and this
+ * buys the time.
+ *
+ * Deliberately NOT tied to the station rows: the whole point is that pacing is a dramatic
+ * decision, not a consequence of where a station happens to sit. Depths are the same numbers the
+ * HUD prints, so a stretch can be dialled by flying it and reading the percentages off.
+ *
+ * Points must be sorted by Depth. An empty curve means no pacing at all — the inert default, so
+ * nothing changes anywhere until a curve is authored.
+ */
+/**
+ * FQZLowShader — one substitution for the MIDDLE shader tier.
+ *
+ * The bisect used to offer two states: the authored materials, or one flat stand-in on
+ * everything. That answers "is it the shaders" and nothing else — when the stand-in is faster,
+ * you still do not know whether it was the noise, the fresnel, the translucency or simply that
+ * every surface became one colour. And the stand-in destroys identity, so the frame it measures
+ * is not a frame anyone would ever ship.
+ *
+ * The middle tier swaps each heavy material for a LIGHT VERSION OF ITSELF: same colour, same
+ * blend mode, same dissolve — without the per-pixel noise, fresnel chains and time. The scene
+ * still reads as the scene. If mid is fast and high is slow, the cost is in the material's
+ * maths. If mid is slow too, it is geometry, overdraw or fill, and no shader work will save it.
+ *
+ * Filled by dev/qz_low_shaders.py. Hard references, so the substitutes are cooked into a
+ * packaged build instead of being looked up by a path that only resolves in the editor.
+ */
+USTRUCT(BlueprintType)
+struct FQZLowShader
+{
+	GENERATED_BODY()
+
+	/** The authored material as it appears in a mesh slot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Shaders")
+	TObjectPtr<UMaterialInterface> From = nullptr;
+
+	/** What the middle tier wears instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Shaders")
+	TObjectPtr<UMaterialInterface> To = nullptr;
+};
+
+USTRUCT(BlueprintType)
+struct FQZPacePoint
+{
+	GENERATED_BODY()
+
+	/** Where on the zoom bar, 0..1 — the same number the HUD shows as DEPTH. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pacing", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float Depth = 0.f;
+
+	/** Trigger speed here, as a multiple of the normal rate. 1 = unchanged, 0.3 = three times as
+	 *  long to cross the same stretch. Interpolated linearly to the next point, so a slow zone is
+	 *  entered and left gradually rather than stepping. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pacing", meta=(ClampMin="0.05", ClampMax="3.0"))
+	float Speed = 1.f;
+};
+
 USTRUCT(BlueprintType)
 struct FQZComms
 {
@@ -514,6 +650,33 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="0.5")) float GluonJunctionWander = 0.12f;
 	/** String thickness, in the beam mesh's own local units. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.005", ClampMax="1.0")) float GluonThickness = 0.075f;
+
+	/** ═══ COLOUR CHARGE. Quarks carry one of three charges and swap them constantly; a proton is
+	 *  colourless because its three quarks always hold three DIFFERENT ones. So this is not three
+	 *  independent cycles — it is one wheel with the three quarks a third of a turn apart, which
+	 *  keeps all three colours present at every instant. A loose reference, not a simulation.
+	 *
+	 *  Written into the Niagara user parameters Color_1 / Color_2 / Color_3 of every system whose
+	 *  actor (or an ancestor) carries a QZQuark<N> tag. Color_1 is that quark's own charge,
+	 *  Color_2 and Color_3 are the other two — so a system can use one, or all three as a ramp.
+	 *
+	 *  Pastel on purpose (Markos): saturated primaries read as an error state, washed ones as
+	 *  a property of the object. ═══ */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks")
+	TArray<FLinearColor> QuarkColorWheel = {
+		FLinearColor(1.00f, 0.62f, 0.66f, 1.f),   // red
+		FLinearColor(0.66f, 1.00f, 0.72f, 1.f),   // green
+		FLinearColor(0.64f, 0.74f, 1.00f, 1.f) }; // blue
+
+	/** Length of ONE turn of the wheel, in degrees of the shared swirl clock (FillerSwirl, which
+	 *  advances 14 deg/s and is broadcast to every node — so the cycle is cluster-synced for free
+	 *  instead of needing its own event).
+	 *
+	 *  MUST DIVIDE 3600 EXACTLY. The swirl wraps there, and a period that does not divide it
+	 *  would make the colours jump at every wrap. 120 = one turn per 8.6 s. Other safe values:
+	 *  72, 90, 144, 180, 240, 360. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="10.0"))
+	float QuarkColorPeriodDeg = 120.f;
 	float QuarkClock = 0.f;
 	/** Authored rest positions, captured the first frame each quark is seen. */
 	TArray<FVector> QuarkHome;
@@ -708,6 +871,11 @@ public:
 	bool  bPalMinusPrev = false, bPalPlusPrev = false, bPalResetPrev = false;
 	int32 NaniteDiagStep = 0;        // R3 cycles r.Nanite.ProxyRenderMode: 0 normal / 2 fallback / 3 full-Nanite
 	bool  bNaniteDiagPrev = false;
+	/** PERF-BISECT AXIS: Nanite off. L3 inside the mute menu, broadcast as 'noff' so every node
+	 *  switches together — r.Nanite is per-node, and a Nanite wall next to a fallback floor
+	 *  measures nothing. Distinct from NaniteDiagStep above: that one asks WHICH Nanite path the
+	 *  cluster takes, this one asks whether Nanite is involved at all. */
+	bool  bNaniteOff = false;
 
 	// ── DMI CACHE ────────────────────────────────────────────────────────────────────────────────────────
 	// THE STARTUP STALL: SetStationFade ran CreateDynamicMaterialInstance() on first touch of every material
@@ -763,7 +931,14 @@ public:
 	TArray<TWeakObjectPtr<USceneComponent>> DCRAViewpoints;   // per-viewport view origins (wall + floor)
 	TArray<FRotator> DCRAViewpointBase;                        // their authored rotations, captured once
 	void ApplyFreeLook(float Yaw, float Pitch);   // rotate the DCRA (cluster) or the camera (PIE)
+	// Base offset and orientation of every QZFollowLook actor, captured against the camera on
+	// first sight. Captured once on purpose: reading the live transform each frame would apply
+	// the look rotation to an already-rotated value and the actor would walk away.
+	TMap<TWeakObjectPtr<AActor>, FVector>   LookFollowBaseOff;
+	TMap<TWeakObjectPtr<AActor>, FRotator>  LookFollowBaseRot;
 	void ApplyNaniteDiag();                       // set r.Nanite.ProxyRenderMode on this node (idempotent, all nodes)
+	void ApplyNaniteOff();                        // set r.Nanite 0/1 on this node (the bisect axis)
+	float PaceAt(float P) const;                  // ZoomPace sampled at a depth; 1 when uncurved
 
 	/** Look-around orbit speed (deg/sec at full stick) + pitch clamp. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage")
@@ -826,6 +1001,51 @@ public:
 	 *  more bloom halo around the glyphs (bloom sees the HDR value); lower = calmer, greyer text. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="1.0", ClampMax="1000.0"))
 	float TextCompMax = 400.f;
+
+	/** OVERDRIVE on the grade compensation — the same move the particles make to survive P5: carry
+	 *  enough HDR that the grade lands you where you were authored, instead of asking the grade to
+	 *  be gentler.
+	 *
+	 *  An EXPONENT and not a factor, on purpose. The compensation is 1 wherever a preset does not
+	 *  recolour (P0 neutral, P1, P3, P4, P7, P8), and 1 raised to any power is still 1 — so this
+	 *  cannot blow the readout out where there was never anything to fix. Where the compensation
+	 *  is already 11 (P5's green channel) a power of 1.3 makes it 23. It bites exactly in
+	 *  proportion to how hard the grade bit first.
+	 *
+	 *  1.0 = the old behaviour. The ceiling above still applies. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="1.0", ClampMax="2.5"))
+	float TextGradeCompPower = 1.3f;
+
+	/** ═══ DRAW THE INTERFACE IN A DIFFERENT PASS.
+	 *
+	 *  The readout was UTextRenderComponent — geometry in the scene. Post processing runs over
+	 *  the finished frame, so it necessarily runs over the text too; there is no flag on a mesh
+	 *  that exempts it. Everything above (GradeComp, the power, suspending vignette and bloom in
+	 *  the menu) is arithmetic against a pass that has already happened, and a positional term
+	 *  like the vignette walks straight through a per-channel constant.
+	 *
+	 *  Screen-space UMG is drawn AFTER the tonemapper. The grade cannot reach it — not because
+	 *  it is compensated, but because it is already finished.
+	 *
+	 *  PRICE: screen space has no stereo depth; it is painted identically into both eyes and sits
+	 *  ON the wall rather than in the room. That is why the intro CARD went the other way. A
+	 *  title is content and wants depth; a diagnostic panel belongs on the glass.
+	 *
+	 *  Off = the old 3D text, compensation and all. ═══ */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
+	bool bHUDScreenSpace = true;
+
+	/** Point size of the screen-space interface. On an 8K viewport the Slate default is a speck. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout", meta=(ClampMin="6.0", ClampMax="200.0"))
+	float HUDScreenFontSize = 22.f;
+
+	/** Distance from the top-left corner, in pixels. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
+	FVector2D HUDScreenPadding = FVector2D(64.f, 40.f);
+
+	UPROPERTY() TObjectPtr<class UQHudText> HudTextWidget;
+	/** One place that decides what the interface says and whether it is on screen at all. */
+	void PushHudText(const FString& S);
 
 	/** Text colour for the whole zoom interface (readout + detail). Default white. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Readout")
@@ -912,8 +1132,49 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") TObjectPtr<UMaterialInterface> HUDPostMaterial;
 	UPROPERTY() TObjectPtr<UMaterialInstanceDynamic> HUDPostMID;
 
+	/** HOW HARD THE PRESETS RECOLOUR. 1 = the tints as authored, 0 = no tint at all — the grade
+	 *  keeps its exposure, contrast, bloom and vignette and stops pushing hue.
+	 *
+	 *  It exists because a tint is a MULTIPLY, and a multiply destroys information. P5's old
+	 *  (0.40, 0.02, 0.02) left green and blue with a fiftieth of their value, and no colour a
+	 *  material could choose survived it: a golden sulfur and a white orbital arrived at the same
+	 *  red. A material can be re-tuned; a channel already multiplied into the noise floor cannot
+	 *  be recovered downstream. So the place to give hue back is here, at the multiply — not in
+	 *  each of fifty materials.
+	 *
+	 *  Affects EVERY tinted preset (2, 5, 6, 9); the untinted ones are unaffected by definition.
+	 *  Live — no rebuild, no restart. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float PresetTintStrength = 1.f;
+
+	/** While the PERF MENU is open, suspend the two grade terms a per-channel compensation cannot
+	 *  beat: the VIGNETTE (it darkens by position, hardest in the corners the menu lives in — no
+	 *  constant multiplier beats a gradient) and BLOOM (text boosted a hundredfold to survive P5
+	 *  smears into itself). Tint, exposure and contrast stay, so the look is still judgeable with
+	 *  the menu up, and both suspended terms are fixed-cost full-screen passes — a frame-time
+	 *  comparison made with the menu open stays comparable. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look")
+	bool bMenuSuspendsVignette = true;
+
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Look") bool bStyleLightZoomGate = true;
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0")) float StyleLightZoomOn = 0.13f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0")) float StyleLightZoomOn = 0.14f;
+
+	/** DEPTH AT WHICH THE GATE REACHES FULL. The gate used to be a SWITCH in depth — nothing
+	 *  below StyleLightZoomOn, the whole ladder value above it — and leaned on the temporal ease
+	 *  to hide the step. On a slow dive there is no hiding it: the step is what you see. And the
+	 *  switch only ever offered two failures. Early, and a point light with 30000 units of reach
+	 *  arrives in an empty scene at 14% — the pop. Late, and the stretch between the lab and the
+	 *  cell has nothing lighting it at all, because neither of those stations owns a lamp and the
+	 *  shared rig sits at 3 and 2 — the darkness.
+	 *
+	 *  A ramp has neither failure: the target is smoothstepped from ZoomOn to here, so the light
+	 *  GROWS WITH THE DIVE. Put ZoomOn exactly where the stage change fires its StyleStep (the
+	 *  cell takes over at ~0.14) and the light starts from zero at the very moment it is switched
+	 *  on — continuous by construction, nothing to hide.
+	 *
+	 *  Set at or below ZoomOn to get the old switch back. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float StyleLightZoomFull = 0.32f;
 
 	// ── Info BACKGROUND (separate depth layer → tunable stereo pop) ────────────
 	// Editorial layout default: OFF (no boxes — hairline rules carry the structure). Flip on for the panelled look.
@@ -1092,6 +1353,25 @@ private:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.01")) float FillerScaleMin = 0.5f;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="1.0"))  float FillerScaleMax = 14.f;
 
+	/** ═══ WHEN THE MEDIUM IS THERE, as four depths on the 0..1 zoom bar.
+	 *
+	 *  These used to be DERIVED from the station centres — rise over the second half of the
+	 *  cell's approach, fall after NirA — which meant the medium's timing was a side effect of
+	 *  where the ladder happened to put its stations, and moving a station moved the medium with
+	 *  it. It is a dramatic decision, not a geometric one, so it is authored now.
+	 *
+	 *  In -> Full is the swell: keep it WIDE. The medium arriving quickly reads as a switch, and
+	 *  a cloud of instanced meshes appearing at once is the most obviously artificial thing in
+	 *  the piece. Out -> Gone is the departure, and it may be quicker. ═══ */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float FillerInAt = 0.30f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float FillerFullAt = 0.44f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float FillerOutAt = 0.48f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Fillers", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float FillerGoneAt = 0.54f;
+
 	/** Filler colours. The medium runs on M_StationMaster now (M_Filler had NO colour param — its colour was
 	 *  baked into the graph, which is exactly why the palette squeeze never reached the fillers). These are
 	 *  the AUTHORED values the squeeze derives from: proteins on the blue pole, enzymes on the amber one. */
@@ -1149,7 +1429,7 @@ private:
 	 *  Latched: re-arms when the zoom retreats 2% below, so backing out and diving again
 	 *  replays the intro. RB keeps working as the manual override either way. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|CH4", meta=(ClampMin="0.0", ClampMax="1.0"))
-	float CH4AutoStartAt = 0.72f;
+	float CH4AutoStartAt = 0.75f;   // Markos-Meeting 01.09.: trigger at 75%
 	bool bCH4AutoLatch = false;
 	/** The M169 collection — the pawn mirrors its 'orbital_noise' scalar into every Niagara
 	 *  User.OrbitalNoise each frame, so the Sequencer curve drives the particle movement. */
@@ -1265,10 +1545,58 @@ public:
 private:
 	TMap<TWeakObjectPtr<AActor>, float> PPBaseWeight;                 // PostProcessVolume base BlendWeight, persistent
 	TMap<TWeakObjectPtr<ULightComponent>, float> LightFadeSmoothed;  // per-light eased fade (prolongs the ramp)
+	// READ-OUT, not state: what the lighting actually did this frame, so the perf menu can print
+	// it. "It is dark here" was answered five times by re-deriving band values on paper; the
+	// frame knew the answer all along and nobody was asking it.
+	int32   LightDbgCount = 0;      // lights UpdateLights touched
+	float   LightDbgMax = 0.f;      // brightest applied fade among them
+	FString LightDbgTop;            // and which one it was
 	TMap<TWeakObjectPtr<AActor>, float> PPFadeSmoothed;              // per-PP eased fade
 	/** Speed the map-light + PP fade EASES toward the station's visibility. Lower = slower/prolonged ramp.
 	 *  Michael wanted this ~3x slower than the instant snap it replaced. */
+	/** How long the EROSION stays the visible mechanism before the uniform wipe takes over.
+	 *
+	 *  The station masters are MASKED, and a masked material's clip threshold is a hard step:
+	 *  the instant StationDissolve pushes the mask below it, the entire surface crosses at the
+	 *  same moment. That is a wipe, not a dissolve — and it is what makes a station that was
+	 *  eroding beautifully vanish in one frame.
+	 *
+	 *  StationDissolve = Fade * this. Higher = the gate holds open longer and the noise erosion
+	 *  gets to finish its sentence; the wipe then closes on a surface that is already almost
+	 *  gone. 1.6 crosses at fade 0.21, 4.0 at 0.083, 6.0 at 0.056. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.5", ClampMax="12.0"))
+	float StationDissolveGain = 1.6f;
+
+	/** NIRA-NETZ: NetAmount ueber die Tiefe fahren, statt es fest zu authoren.
+	 *
+	 *  Wirkt nur auf Actors mit dem Tag "QZNetSolid" — M_NiraMaster traegt NetAmount auch auf
+	 *  den Nukleonen (0.69/0.67), und die duerfen ihre authorierten Werte behalten. Ohne den
+	 *  Tag wuerde dieselbe Zeile sie mit ueberschreiben.
+	 *
+	 *  Zwischen From und To wird NetAmount von Open nach Solid interpoliert (smoothstep),
+	 *  davor bleibt Open stehen, danach Solid. Beide Endwerte sind Parameter, weil die
+	 *  RICHTUNG vom Graphen abhaengt: bei MI_NIRA_Net_Volume steht NetAmount auf 1.0 gegen
+	 *  einen Master-Default von 0, also ist 1 das volle Netz und kleiner = geschlossener.
+	 *  Sollte es umgekehrt sein, tauscht man hier zwei Zahlen statt neu zu bauen. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") bool  bNetSolidRamp   = true;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float NetSolidFrom   = 0.50f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float NetSolidTo     = 0.65f;
+	/** NetAmount vor dem Fenster — der authorierte Wert der Instanz. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountOpen  = 1.00f;
+	/** NetAmount am Ende des Fensters. Kleiner = geschlossener. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountSolid = 0.25f;
+
 	UPROPERTY(EditAnywhere, Category="QZoomStage") float LightFadeSpeed = 1.2f;
+
+	/** Width of the ramp at each edge of a LIGHT WINDOW (tags QZLightOn<pct> / QZLightOff<pct>),
+	 *  in units of the zoom bar. A window light belongs to a MOMENT rather than to a station —
+	 *  the pawn's headlamp is the case: it is not in any station sublevel and must not follow
+	 *  one, it belongs to "you are inside the mushroom". 0.02 = it takes 2% of the dive to come
+	 *  up and the same to go, which at any normal zoom speed reads as a swell. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.002", ClampMax="0.3"))
+	float LightWindowSoft = 0.02f;
 
 	/** Lights reach FULL brightness once the station's fade passes this, instead of tracking it all the way
 	 *  to 1. Tying light intensity directly to the dissolve ramp meant the lab stayed dark until the mushroom
@@ -1319,6 +1647,21 @@ private:
 	 *  sequence instead of all at once. 0 = all together, as before. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.0", ClampMax="0.5"))
 	float LightStaggerStep = 0.07f;
+
+	/** ═══ ZOOM PACING — how long a stretch TAKES, independent of how wide it is on the bar.
+	 *  See FQZPacePoint for why this exists. Sorted by Depth; EMPTY = off, which is the default,
+	 *  so an unauthored curve changes nothing anywhere.
+	 *
+	 *  It is a multiplier on the TRIGGER RATE and on nothing else. No station moves, no band
+	 *  changes width, every depth anyone has ever dialled stays exactly where it was — only the
+	 *  seconds spent between them change. That is what makes it safe to add to a tuned show. ═══ */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel")
+	TArray<FQZPacePoint> ZoomPace;
+
+	/** Floor under the pacing curve. A chapter may be slow; it may not become a wall the operator
+	 *  cannot push through. Same reasoning as DetentDamping never being zero. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Zoom Feel", meta=(ClampMin="0.02", ClampMax="1.0"))
+	float ZoomPaceFloor = 0.1f;
 
 	/** Detents: depths where the descent gets sticky, so the operator can settle on a beat instead of
 	 *  holding the trigger against a moving target. These are the script's [PAUSE] marks. Empty = off. */
@@ -1393,9 +1736,19 @@ private:
 	 *  frame rate jumps on toggle = shader cost; stays put = geometry/overdraw/volumes. The
 	 *  heterogeneous volumes are hidden while on (a ray-marcher has no simple version), Niagara
 	 *  is left alone, and station fades stop landing (their DMIs are unbound) — diagnostic mode,
-	 *  not show mode. Everything restores exactly on toggle-off. */
-	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
-	bool bSimpleShaders = false;
+	 *  not show mode. Everything restores exactly on return to HIGH.
+	 *
+	 *  THREE TIERS, not two. [X] cycles 0 -> 1 -> 2:
+	 *    0 HIGH  the authored materials
+	 *    1 MID   each heavy material replaced by a light version OF ITSELF (LowShaders below):
+	 *            same colour, same blend mode, same dissolve, without the per-pixel noise and
+	 *            fresnel. The scene still reads as the scene.
+	 *    2 LOW   one flat stand-in on everything — the old behaviour
+	 *  Two states could only answer "is it the shaders". Three separate the material's MATHS from
+	 *  its mere presence: if MID is fast the cost is arithmetic, if MID is as slow as HIGH it is
+	 *  geometry, overdraw or fill and no shader work will save it. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0", ClampMax="2"))
+	int32 ShaderLevel = 0;
 	/** Mute-menu [D-Pad Right]: every Niagara system off/on. The third bisect axis — stations
 	 *  (1-9/A), shaders (X), particles (this). Enforced per frame in the fade loop, so nothing
 	 *  reactivates a muted system; cluster-synced. */
@@ -1427,8 +1780,19 @@ private:
 	UPROPERTY() TArray<TObjectPtr<UMaterialInterface>> SimpleSavedMats;
 	TArray<TWeakObjectPtr<UPrimitiveComponent>> SimpleSavedComps;
 	TArray<int32> SimpleSavedStart;
+	/** Component -> its slot in the arrays above. Without it a re-entrant pass (a station streamed
+	 *  in, or a tier change) would have to scan linearly to find whether a component's ORIGINALS
+	 *  are already recorded — and recording a stand-in as the original makes restore a no-op,
+	 *  which is exactly the bug the old "already wearing the stand-in" guard papered over. */
+	TMap<TWeakObjectPtr<UPrimitiveComponent>, int32> SimpleSavedIndex;
 	TArray<TWeakObjectPtr<UPrimitiveComponent>> SimpleHiddenVols;
-	void ApplySimpleShaders(bool bOn);
+
+	/** MID-tier substitutions. Empty = MID behaves like HIGH, which is the honest default: no
+	 *  invented middle, just nothing to swap. Filled by dev/qz_low_shaders.py. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect")
+	TArray<FQZLowShader> LowShaders;
+
+	void ApplyShaderLevel(int32 Level);
 
 	float OrbitYaw = 0.f, OrbitPitch = 0.f, ZoomVel = 0.f;
 	float PrevZoom = 0.f;      // for a cluster-consistent visual velocity (ZoomProgress delta, valid on every node)
