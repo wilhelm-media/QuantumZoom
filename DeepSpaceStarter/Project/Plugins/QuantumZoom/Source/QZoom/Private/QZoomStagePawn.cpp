@@ -58,6 +58,16 @@ static const FName TAG_FOLLOWLOOK(TEXT("QZFollowLook"));
 // Nur diese Actors bekommen NetAmount von der Tiefe gefahren. M_NiraMaster traegt NetAmount
 // auch auf den Nukleonen; ohne die Eingrenzung wuerden deren authorierte Werte mitgerissen.
 static const FName TAG_NETSOLID(TEXT("QZNetSolid"));
+// Nur die beiden GROESSEN-Schreiber ueberspringen, ParticleColor aber weiter zulassen.
+// QZKeepStyle kann das nicht: der schaltet alle drei zusammen ab. Fuer die Orbital-Filler
+// war genau die Groesse gefragt und die Farbe ausdruecklich nicht.
+static const FName TAG_KEEPSCALE(TEXT("QZKeepScale"));
+// Der Spiegel dazu: NUR die Farbe ueberspringen, Groesse weiter vom Pawn. Die
+// Quark-Filler brauchen das - sie bekommen ihre Farbe aus QuarkColorWheel (Color_1..3),
+// und das globale ParticleColor (ein Amber mit Luminanz 1.62, Rest der alten
+// P5-Ueberkompensation) ueberfaehrt den Farbzyklus, sodass alle drei amber lesen.
+// QZKeepStyle koennte das auch, nimmt aber die Zoom-Skalierung mit.
+static const FName TAG_KEEPCOLOR(TEXT("QZKeepColor"));
 
 // The nominal span every hero is normalised to: 2 x E_TARGET 1732, the size Petri, Nidulans,
 // NirA and MET169 all sit at. It is the one number that turns a station's exp() scale back
@@ -810,9 +820,12 @@ void AQZoomStagePawn::PollInput(float Dt)
 		// MUTE MENU is modal on the D-Pad: Up/Down move the cursor. The preset/filler bindings are
 		// deliberately swallowed — cycling a PP preset or rebuilding the fillers mid-bisect would
 		// change the very frame time being measured.
+		// +1: unter den Stationszeilen liegt die SAFE-MODE-Zeile. Der Cursor laeuft ueber
+		// NRows+1 Positionen; Position NRows IST die Safe-Zeile.
 		const int32 NRows = FMath::Clamp(StationCount, 1, 9);
-		if (bUp && !bUpPrev)   MuteSel = (MuteSel + NRows - 1) % NRows;
-		if (bDn && !bDownPrev) MuteSel = (MuteSel + 1) % NRows;
+		const int32 NSel  = NRows + 1;
+		if (bUp && !bUpPrev)   MuteSel = (MuteSel + NSel - 1) % NSel;
+		if (bDn && !bDownPrev) MuteSel = (MuteSel + 1) % NSel;
 		if (bRt && !bRightPrev)
 		{
 			bParticlesMuted = !bParticlesMuted;
@@ -889,9 +902,18 @@ void AQZoomStagePawn::PollInput(float Dt)
 	{
 		if (bA && !bAPrev)
 		{
-			StationMuteMask ^= (1 << MuteSel);
-			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] row %d %s  mask=0x%X"), MuteSel,
-				(StationMuteMask & (1 << MuteSel)) ? TEXT("MUTED") : TEXT("unmuted"), StationMuteMask);
+			const int32 NSafeRow = FMath::Clamp(StationCount, 1, 9);
+			if (MuteSel >= NSafeRow)
+			{
+				bSafeMode = !bSafeMode;
+				ApplySafeMode();
+			}
+			else
+			{
+				StationMuteMask ^= (1 << MuteSel);
+				UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] row %d %s  mask=0x%X"), MuteSel,
+					(StationMuteMask & (1 << MuteSel)) ? TEXT("MUTED") : TEXT("unmuted"), StationMuteMask);
+			}
 		}
 		if (bB && !bBPrev && StationMuteMask != 0)
 		{
@@ -1017,6 +1039,7 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("pmut"),  FString::FromInt(bParticlesMuted ? 1 : 0)); // particle bisect axis: all nodes drop them together
 	Event.Parameters.Add(TEXT("amut"),  FString::FromInt(bAnimMuted ? 1 : 0));      // CH4 split: the animation half
 	Event.Parameters.Add(TEXT("nmut"),  FString::FromInt(bNirAMuted ? 1 : 0));      // CH4 split: the NirA half
+	Event.Parameters.Add(TEXT("safe"),  FString::FromInt(bSafeMode ? 1 : 0));       // SAFE MODE: jedes Node schaltet sein eigenes Buendel
 	Event.Parameters.Add(TEXT("noff"),  FString::FromInt(bNaniteOff ? 1 : 0));      // Nanite axis: a per-node cvar,
 	                                                                               // so every node must be told
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
@@ -1078,6 +1101,14 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	// a toggle STATE, not an integrated clock — the primary's self-echo carries the same value,
 	// so applying it everywhere is idempotent (unlike c4p, which oscillated)
 	if (const FString* Pm = E.Parameters.Find(TEXT("pmut"))) bParticlesMuted = (FCString::Atoi(**Pm) != 0);
+	if (const FString* Sf = E.Parameters.Find(TEXT("safe")))
+	{
+		const bool bNewSafe = (FCString::Atoi(**Sf) != 0);
+		// Nur bei WECHSEL anwenden: ApplySafeMode sichert/restauriert Lichtzustaende, und ein
+		// wiederholtes Sichern des bereits abgeschalteten Zustands wuerde die Originale
+		// ueberschreiben - dann gaebe es nichts mehr zu restaurieren.
+		if (bNewSafe != bSafeMode) { bSafeMode = bNewSafe; ApplySafeMode(); }
+	}
 	if (const FString* Am = E.Parameters.Find(TEXT("amut"))) bAnimMuted = (FCString::Atoi(**Am) != 0);
 	if (const FString* Nm = E.Parameters.Find(TEXT("nmut"))) bNirAMuted = (FCString::Atoi(**Nm) != 0);
 	// r.Nanite is a PER-NODE console variable, so a bisect that only switched the primary would
@@ -2505,11 +2536,35 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// the actor keeps StationFade, StationScale, the activation gate and OrbitalNoise (the
 			// plumbing, which every system needs) and skips only the three style writes.
 			const bool bKeepStyle = A->Tags.Contains(TAG_KEEPSTYLE);
+			// QZKeepScale ist die feinere Stufe: Groesse bleibt beim System, Farbe kommt
+			// weiter vom Pawn. QZKeepStyle schliesst sie mit ein.
+			const bool bKeepScale = bKeepStyle || A->Tags.Contains(TAG_KEEPSCALE);
 			const float PScaleMul = bParticleScaleTracksZoom ? FMath::Max(GateScale, 1e-4f) : 1.f;
-			if (!bKeepStyle)
+			if (!bKeepScale)
 			{
 				NC->SetVariableFloat(FName(TEXT("ParticleScale")),     ParticleScale     * PScaleMul);
 				NC->SetVariableFloat(FName(TEXT("ParticleGlowScale")), ParticleGlowScale * PScaleMul);
+			}
+			// FESTE WELTGROESSE - nur fuer AUSDRUECKLICH mit QZKeepScale getaggte Systeme.
+			//
+			// Zuerst hing das an bKeepScale, und das schliesst QZKeepStyle mit ein: damit
+			// wurde auch N_Particles_Wind im Labor auf Weltskalierung 1 festgenagelt und
+			// schrumpfte optisch, waehrend die Station um es herum wuchs. Gefragt war die
+			// Entkopplung nur fuer die Orbital-Filler. QZKeepStyle heisst "der Pawn soll
+			// meine Werte in Ruhe lassen" - nicht "nagle mich auf eine Weltgroesse fest".
+			//
+			// Die Komponente haengt unter der Station und erbt jeden Frame deren wachsende
+			// Skalierung. Ueber User-Parameter ist das nicht zu halten, dieselbe Kette
+			// multipliziert sie mit; die Weltskalierung direkt zu setzen ist der einzige
+			// Ort, an dem die Vererbung ueberschrieben wird.
+			else if (bFillerFixedScale && A->Tags.Contains(TAG_KEEPSCALE))
+			{
+				NC->SetWorldScale3D(FVector(FMath::Max(FillerFixedScale, 1e-4f)));
+			}
+			// Farbe getrennt vom Rest schaltbar - siehe TAG_KEEPCOLOR.
+			const bool bKeepColor = bKeepStyle || A->Tags.Contains(TAG_KEEPCOLOR);
+			if (!bKeepColor)
+			{
 
 				// User.ParticleColor. A colour, not a brightness, because the problem was never
 				// brightness: P5 multiplies green by 0.02, so no amount of gain rescues a green
@@ -3071,6 +3126,81 @@ float AQZoomStagePawn::PaceAt(float P) const
 		}
 	}
 	return 1.f;
+}
+
+void AQZoomStagePawn::ApplySafeMode()
+{
+	// DIE NOTBREMSE. Ein Buendel statt vieler Einzelgriffe, damit am Show-Tag EIN Handgriff
+	// reicht und der Rueckweg genauso ein Handgriff ist. Alles hier ist reversibel: cvars
+	// gehen auf ihre Defaults zurueck, Lichtzustaende werden VOR dem Abschalten gesichert
+	// und beim Ausschalten exakt wiederhergestellt.
+	//
+	// Die Posten kommen aus dem Audit vom 03.09.:
+	//   2.25 Mio Dreiecks-Instanzen        -> r.ForceLOD 2 (12 % wo LODs existieren; die
+	//                                         zehn schweren Assets haben seit heute welche)
+	//   21 additive Orbital-Slots (NirA)   -> SeparateTranslucency 50 % (halber Overdraw)
+	//   Volumetrik auf 10 Lichtern         -> r.VolumetricFog 0 + Streuung pro Licht auf 0
+	//   Schatten (Cubemap = 6 Paesse)      -> CastShadows aus, Aufloesung 1024
+	UWorld* W = GetWorld();
+	if (!W) return;
+	auto Cmd = [&](const TCHAR* C) { GEngine->Exec(W, C); };
+	if (bSafeMode)
+	{
+		Cmd(TEXT("r.ForceLOD 2"));
+		Cmd(TEXT("r.SeparateTranslucencyScreenPercentage 50"));
+		Cmd(TEXT("r.VolumetricFog 0"));
+		Cmd(TEXT("r.Shadow.MaxResolution 1024"));
+		// Der Cvar ist die Garantie: SetCastShadows unten greift bei STATIONARY-Lichtern
+		// (Light_Drama_1, der 6-Pass-Cubemap-Werfer) womoeglich nicht - r.ShadowQuality 0
+		// schaltet dynamische Schatten global ab, unabhaengig von der Mobility.
+		Cmd(TEXT("r.ShadowQuality 0"));
+		SafeSavedShadows.Empty();
+		SafeSavedVolScatter.Empty();
+		SafeHiddenFog.Empty();
+		for (TActorIterator<AActor> It(W); It; ++It)
+		{
+			const FString Cls = It->GetClass()->GetName();
+			if (Cls.Contains(TEXT("FogVolume")) || Cls.Contains(TEXT("ExponentialHeightFog")))
+			{
+				if (!It->IsHidden())
+				{
+					SafeHiddenFog.Add(*It);
+					It->SetActorHiddenInGame(true);
+				}
+				continue;
+			}
+			TArray<ULightComponent*> LCs;
+			It->GetComponents<ULightComponent>(LCs);
+			for (ULightComponent* LC : LCs)
+			{
+				SafeSavedShadows.Add(LC, LC->CastShadows != 0);
+				SafeSavedVolScatter.Add(LC, LC->VolumetricScatteringIntensity);
+				LC->SetCastShadows(false);
+				LC->SetVolumetricScatteringIntensity(0.f);
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] SAFE MODE AN: %d Lichter entschattet, %d Nebel versteckt"),
+			SafeSavedShadows.Num(), SafeHiddenFog.Num());
+	}
+	else
+	{
+		Cmd(TEXT("r.ForceLOD -1"));
+		Cmd(TEXT("r.SeparateTranslucencyScreenPercentage 100"));
+		Cmd(TEXT("r.VolumetricFog 1"));
+		Cmd(TEXT("r.Shadow.MaxResolution 2048"));
+		Cmd(TEXT("r.ShadowQuality 5"));
+		for (auto& Pr : SafeSavedShadows)
+			if (ULightComponent* LC = Pr.Key.Get()) LC->SetCastShadows(Pr.Value);
+		for (auto& Pr : SafeSavedVolScatter)
+			if (ULightComponent* LC = Pr.Key.Get()) LC->SetVolumetricScatteringIntensity(Pr.Value);
+		for (auto& Ap : SafeHiddenFog)
+			if (AActor* F = Ap.Get()) F->SetActorHiddenInGame(false);
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] SAFE MODE aus: %d Lichter restauriert"),
+			SafeSavedShadows.Num());
+		SafeSavedShadows.Empty();
+		SafeSavedVolScatter.Empty();
+		SafeHiddenFog.Empty();
+	}
 }
 
 void AQZoomStagePawn::ApplyNaniteOff()
@@ -3667,6 +3797,9 @@ void AQZoomStagePawn::UpdateReadout()
 				Handover.IsValidIndex(i) ? *Handover[i].Name.ToString() : TEXT("?"),
 				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"), F);
 		}
+		Menu += FString::Printf(TEXT("\n%s [S] SAFE MODE       %-8s"),
+			(MuteSel >= NRows) ? TEXT(">") : TEXT("  "),
+			bSafeMode ? TEXT("AN  <<<") : TEXT("aus"));
 		Menu += FString::Printf(
 			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s")
 			TEXT("\n[<] anim: %s   [LB] nira: %s   [R3] 8K-SIM: %s")

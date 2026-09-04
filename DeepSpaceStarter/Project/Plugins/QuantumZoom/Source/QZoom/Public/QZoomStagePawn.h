@@ -938,6 +938,19 @@ public:
 	TMap<TWeakObjectPtr<AActor>, FRotator>  LookFollowBaseRot;
 	void ApplyNaniteDiag();                       // set r.Nanite.ProxyRenderMode on this node (idempotent, all nodes)
 	void ApplyNaniteOff();                        // set r.Nanite 0/1 on this node (the bisect axis)
+
+	/** SAFE MODE - die eine Notbremse fuer den Show-Tag. Eine Menuezeile, ein Buendel:
+	 *  r.ForceLOD 2 (Geometrie auf 12 % wo LODs existieren), SeparateTranslucency 50 %
+	 *  (halbiert den Overdraw der additiven Orbitale), VolumetricFog aus, Schatten und
+	 *  volumetrische Streuung ALLER Lichter aus (gesichert und beim Ausschalten exakt
+	 *  wiederhergestellt), Schattenaufloesung 1024. Cluster-synchron ueber den "safe"-
+	 *  Parameter, wie jede andere Bisect-Achse. */
+	void ApplySafeMode();
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bSafeMode = false;
+	TMap<TWeakObjectPtr<ULightComponent>, bool>  SafeSavedShadows;
+	TMap<TWeakObjectPtr<ULightComponent>, float> SafeSavedVolScatter;
+	TArray<TWeakObjectPtr<AActor>> SafeHiddenFog;
 	float PaceAt(float P) const;                  // ZoomPace sampled at a depth; 1 when uncurved
 
 	/** Look-around orbit speed (deg/sec at full stick) + pitch clamp. */
@@ -1583,10 +1596,29 @@ private:
 	float NetSolidFrom   = 0.50f;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Net", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float NetSolidTo     = 0.65f;
-	/** NetAmount vor dem Fenster — der authorierte Wert der Instanz. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountOpen  = 1.00f;
-	/** NetAmount am Ende des Fensters. Kleiner = geschlossener. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountSolid = 0.25f;
+	/** NetAmount am Anfang des Fensters (und davor). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountOpen  = 0.65f;
+	/** NetAmount am Ende des Fensters (und danach). GROESSER = solider — die Richtung war
+	 *  andersherum als der Name vermuten laesst, gemessen an Michaels Vorgabe 0.65 -> 1.2. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountSolid = 1.20f;
+
+	/** ORBITAL-FILLER: Groesse vollstaendig von Station und Kamera entkoppeln.
+	 *
+	 *  Die Filler haengen im Attach-Baum unter der Station und erben deren wachsende
+	 *  Skalierung - beim Hineinzoomen aendert sich ihre Groesse deshalb zwangslaeufig mit.
+	 *  Ueber Parameter ist das nicht zu halten: ParticleScale wird von derselben Kette
+	 *  multipliziert. Deshalb wird die WELTSKALIERUNG der Komponente jeden Frame auf einen
+	 *  festen Wert gesetzt, fuer Actors mit dem Tag QZKeepScale.
+	 *
+	 *  Folge, die man kennen muss: die raeumliche Ausdehnung der Partikelwolke ist damit
+	 *  ebenfalls festgenagelt. Waechst das Molekuel, fuellt die Wolke es nicht mehr aus,
+	 *  sondern bleibt ein Fleck konstanter Groesse am Atom. Das ist der Preis fuer
+	 *  "keine Abhaengigkeit" und war so gewuenscht.
+	 *
+	 *  Diese eine Zahl bestimmt die absolute Groesse; sie aendert sich nie von selbst. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net", meta=(ClampMin="0.0001"))
+	float FillerFixedScale = 1.0f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") bool bFillerFixedScale = true;
 
 	UPROPERTY(EditAnywhere, Category="QZoomStage") float LightFadeSpeed = 1.2f;
 

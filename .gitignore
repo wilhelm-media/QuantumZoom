@@ -1,3 +1,8 @@
 # Git-LFS writes its hook stubs into a literal dev/null folder when a shell
 # redirect gets resolved as a relative path. Pure noise, never belongs in the repo.
 /dev/
+
+# sample packs and test maps - deliberately untracked (03.09.2026)
+DeepSpaceStarter/Project/Content/03_Characters/
+DeepSpaceStarter/Project/Content/ExampleContent/
+DeepSpaceStarter/Project/Content/TEST_001.umap
