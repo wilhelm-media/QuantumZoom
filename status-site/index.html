@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Quantum Zoom — Technical Status</title>
+<style>
+  :root{
+    --bg:#fbfaf8; --panel:#ffffff; --ink:#1b1a18; --muted:#6d6a64;
+    --line:#e2ded6; --accent:#8a5a2b; --accent-soft:#f3ece2;
+    --ok:#2f6b46; --warn:#8a6a12; --risk:#8c3630;
+    --mono:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#141311; --panel:#1c1b18; --ink:#eceae5; --muted:#a09b91;
+      --line:#302d28; --accent:#d9a066; --accent-soft:#26221c;
+      --ok:#7fc39a; --warn:#d8bb63; --risk:#e0837c;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#141311; --panel:#1c1b18; --ink:#eceae5; --muted:#a09b91;
+    --line:#302d28; --accent:#d9a066; --accent-soft:#26221c;
+    --ok:#7fc39a; --warn:#d8bb63; --risk:#e0837c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:16px;line-height:1.6;-webkit-text-size-adjust:100%}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px 96px}
+  header.top{border-bottom:1px solid var(--line);margin-bottom:40px;
+             padding:56px 0 28px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;
+           text-transform:uppercase;color:var(--accent);margin:0 0 12px}
+  h1{font-size:clamp(30px,5vw,46px);line-height:1.1;margin:0 0 14px;
+     font-weight:650;letter-spacing:-.02em}
+  .lede{font-size:18px;color:var(--muted);margin:0;max-width:64ch}
+  .meta{margin-top:22px;font-family:var(--mono);font-size:12.5px;
+        color:var(--muted)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.13em;
+     text-transform:uppercase;color:var(--accent);margin:56px 0 4px;
+     padding-top:22px;border-top:1px solid var(--line)}
+  h2:first-of-type{margin-top:0}
+  h3{font-size:20px;margin:30px 0 8px;font-weight:620;letter-spacing:-.01em}
+  h4{font-size:15px;margin:22px 0 6px;font-weight:640}
+  p{margin:0 0 14px;max-width:74ch}
+  ul,ol{margin:0 0 16px;padding-left:22px;max-width:74ch}
+  li{margin:5px 0}
+  code{font-family:var(--mono);font-size:.88em;background:var(--accent-soft);
+       padding:1px 5px;border-radius:3px}
+  .grid{display:grid;gap:14px;margin:20px 0}
+  @media(min-width:680px){.g3{grid-template-columns:repeat(3,1fr)}
+                          .g2{grid-template-columns:repeat(2,1fr)}
+                          .g4{grid-template-columns:repeat(4,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:16px 18px}
+  .kpi{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1.1;
+       letter-spacing:-.02em}
+  .kpi small{display:block;font-family:var(--sans);font-size:12.5px;
+             font-weight:400;color:var(--muted);letter-spacing:0;margin-top:6px}
+  .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:18px 0;
+          border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:14px;min-width:560px}
+  th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--line);
+        vertical-align:top}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;
+     text-transform:uppercase;color:var(--muted);font-weight:500;
+     white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  td.num,th.num{font-family:var(--mono);text-align:right;white-space:nowrap}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;
+       padding:2px 7px;border-radius:20px;border:1px solid var(--line);
+       color:var(--muted);white-space:nowrap}
+  .tag.ok{color:var(--ok);border-color:currentColor}
+  .tag.warn{color:var(--warn);border-color:currentColor}
+  .tag.risk{color:var(--risk);border-color:currentColor}
+  blockquote{margin:16px 0;padding:12px 18px;border-left:3px solid var(--accent);
+             background:var(--accent-soft);border-radius:0 8px 8px 0;
+             color:var(--ink)}
+  blockquote p{margin:0;max-width:none}
+  blockquote cite{display:block;margin-top:8px;font-style:normal;
+                  font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .tl{list-style:none;padding:0;margin:18px 0}
+  .tl li{display:grid;grid-template-columns:96px 1fr;gap:16px;padding:9px 0;
+         border-bottom:1px solid var(--line);margin:0}
+  .tl li:last-child{border-bottom:none}
+  .tl .d{font-family:var(--mono);font-size:12.5px;color:var(--accent);
+         padding-top:2px;white-space:nowrap}
+  .tl .t{font-size:14.5px}
+  .tl .t em{display:block;font-style:normal;color:var(--muted);font-size:13px;
+            margin-top:2px}
+  .note{font-size:13.5px;color:var(--muted);border-left:2px solid var(--line);
+        padding-left:14px;margin:16px 0;max-width:74ch}
+  footer{margin-top:64px;padding-top:22px;border-top:1px solid var(--line);
+         font-size:13px;color:var(--muted)}
+  a{color:var(--accent)}
+  @media print{
+    body{background:#fff;color:#000;font-size:11pt}
+    .card,.scroll{break-inside:avoid}
+    h2{break-after:avoid} h3{break-after:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Internal status · not for distribution</p>
+  <h1>Quantum Zoom — Technical Status</h1>
+  <p class="lede">A single-take descent through thirteen orders of magnitude, from a
+     mushroom on the forest floor to the quarks inside a sulfur nucleus — running live
+     on the Ars Electronica Deep Space 8K wall and floor.</p>
+  <p class="meta">Prepared 6 September 2026 · for the Quantum Zoom rehearsal,
+     Monday 7 September, 11:00–12:00 CEST · Wilhelm Media</p>
+</header>
+
+<h2>1 — At a glance</h2>
+<div class="grid g4">
+  <div class="card"><div class="kpi">8<small>stations on the scale ladder</small></div></div>
+  <div class="card"><div class="kpi">14.5<small>decades of scale, log-spaced</small></div></div>
+  <div class="card"><div class="kpi">2<small>nDisplay nodes: wall + floor</small></div></div>
+  <div class="card"><div class="kpi">60&thinsp;%<small>render resolution, show default</small></div></div>
+</div>
+<div class="grid g4">
+  <div class="card"><div class="kpi">440<small>materials (164 masters, 276 instances)</small></div></div>
+  <div class="card"><div class="kpi">70<small>meshes (62 static, 8 skeletal)</small></div></div>
+  <div class="card"><div class="kpi">13.3&thinsp;k<small>lines of C++ in the QZoom plugin</small></div></div>
+  <div class="card"><div class="kpi">1.4&thinsp;GB<small>project content</small></div></div>
+</div>
+
+<h2>2 — Monday's rehearsal</h2>
+<p><strong>Monday 7 September, 11:00–12:00 CEST, Microsoft Teams</strong>, organised by
+   Melinda File. The slot was picked around Karl Jansen's constraints (busy at 10:00 and
+   14:00 Berlin time) and Alejandro Saenz's availability.</p>
+
+<h3>Who is in the room, and what each will be looking for</h3>
+<div class="scroll">
+<table>
+<thead><tr><th>Person</th><th>Affiliation</th><th>Role in Quantum Zoom</th><th>Likely focus on Monday</th></tr></thead>
+<tbody>
+<tr><td><strong>Melinda File</strong></td><td>Ars Electronica</td>
+    <td>Producer and coordinator; organises the Deep Space test slots and the
+        rehearsal; runs the funding thread</td>
+    <td>Does it run reliably in Deep Space? Is the performance issue from the
+        21 August test closed?</td></tr>
+<tr><td><strong>Markos Kay</strong></td><td>mrkism.com</td>
+    <td>Artist and director; author of the show script; art direction</td>
+    <td>Colour palette — he asked for one distinct hue per scene, and for fog
+        instead of black backgrounds. Pacing and dramaturgy of the descent.</td></tr>
+<tr><td><strong>Karl Jansen</strong></td><td>DESY</td>
+    <td>Physicist; DESY's involvement is what made the interactive demo possible</td>
+    <td>Scientific accuracy and wording. He has already corrected
+        &ldquo;quantum computer&rdquo; to &ldquo;quantum system&rdquo; in public text.</td></tr>
+<tr><td><strong>Alejandro Saenz</strong></td><td>HU Berlin, Institut für Physik</td>
+    <td>Physicist, scientific advisor</td>
+    <td>Atomic and molecular scale: the MET169 chapter, orbital representation.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h4>Not in Monday's invite, but part of the wider circle</h4>
+<ul>
+  <li><strong>Joseph Strauss</strong> (BOKU) — biology side; none of his team could make
+      this slot.</li>
+  <li><strong>Sofia-Maria Satanakis</strong> and <strong>Marios Christodoulou</strong> (ÖAW).</li>
+  <li><strong>Deniss Boldavesko</strong>, <strong>Katrin Fenninger</strong>,
+      <strong>Benedikt Pfisterer</strong> (Ars Electronica) — the people who actually load
+      and run builds in Deep Space.</li>
+</ul>
+
+<h3>Suggested demo route</h3>
+<p>The descent is one continuous take; there is no chapter-select. A rehearsal run that
+   shows everything without stalling looks like this:</p>
+<ol>
+  <li><strong>0 → 17 %</strong> — Lab and neural structure. Establishes the fixed camera
+      and the powers-of-ten cadence.</li>
+  <li><strong>24 → 50 %</strong> — Cell. The dissolve work of the last week is most
+      visible here.</li>
+  <li><strong>48 → 60 %</strong> — NirA protein and MET169. The CH4 redox cycle runs on
+      its own 30-second clock; let it play at least one full loop.</li>
+  <li><strong>75 → 87 %</strong> — the long dark approach. Deliberately near-empty.</li>
+  <li><strong>90 → 95 %</strong> — nucleons resolve out of a single glowing point. This is
+      the slowest passage in the show, by design.</li>
+  <li><strong>95 → 100 %</strong> — quarks.</li>
+</ol>
+<p class="note">A full descent at full trigger is roughly 33 seconds of pure travel time.
+   In practice the operator holds on beats, so plan for several minutes.</p>
+
+<h2>3 — Technical foundation</h2>
+
+<h3>Engine and cluster</h3>
+<ul>
+  <li><strong>Unreal Engine 5.7</strong>, custom plugin <code>QZoom</code>
+      (13,276 lines of C++; the show pawn alone is 5,529).</li>
+  <li><strong>nDisplay, two cluster nodes</strong>: <code>Node_Wall</code> and
+      <code>Node_Floor</code>, one viewport each, mesh projection onto
+      <code>Display_Wall</code> / <code>Display_Floor</code> (1500 × 845 each).
+      Wall pitch 0°, floor pitch −90° — the L-shaped Deep Space geometry.</li>
+  <li>Render sync over ethernet; input replicated from the primary node. Show state
+      (zoom depth, orbit, menu selections, reaction clock) is broadcast as cluster
+      events so both nodes scrub the same frame.</li>
+  <li>Local rehearsal setup: both nodes run as separate processes on one workstation
+      (RTX 4090).</li>
+</ul>
+
+<h3>The central idea: a fixed camera and a world that scales</h3>
+<p>The camera never moves. Each station is scaled around its own pivot by
+   <code>exp((depth − centre) × K)</code>, so a constant trigger rate produces a constant
+   number of orders of magnitude per second — the natural Powers-of-Ten cadence. Two
+   consequences worth knowing in the room:</p>
+<ul>
+  <li>Whatever sits <em>exactly</em> on a station's pivot is what you fly into. Anything
+      offset gets multiplied outward by the scale and leaves the frame.</li>
+  <li>Station positions are not authored by hand — they are log-spaced from a table of
+      real physical sizes.</li>
+</ul>
+
+<h3>The scale ladder</h3>
+<div class="scroll">
+<table>
+<thead><tr><th>#</th><th>Station</th><th>Subject</th><th class="num">Scale</th>
+           <th class="num">Axis centre</th><th class="num">Visible from</th></tr></thead>
+<tbody>
+<tr><td class="num">0</td><td>LAB</td><td>fruiting body, forest floor</td>
+    <td class="num">~9 cm</td><td class="num">0.0 %</td><td class="num">—</td></tr>
+<tr><td class="num">1</td><td>NEURAL STRUCTURE</td><td>dendritic network</td>
+    <td class="num">~300 µm</td><td class="num">17.1 %</td><td class="num">0.0 %</td></tr>
+<tr><td class="num">2</td><td>CELL</td><td>hyphal cell and nucleus</td>
+    <td class="num">~3 µm</td><td class="num">30.9 %</td><td class="num">14.3 %</td></tr>
+<tr><td class="num">3</td><td>NirA PROTEIN</td><td>AlphaFold P28348</td>
+    <td class="num">~10 nm</td><td class="num">48.0 %</td><td class="num">42.3 %</td></tr>
+<tr><td class="num">4</td><td>MET169</td><td>sulfur atom — the redox switch</td>
+    <td class="num">~0.2 nm</td><td class="num">59.8 %</td><td class="num">47.9 %</td></tr>
+<tr><td class="num">5</td><td>NUCLEUS</td><td>a bright unresolved point</td>
+    <td class="num">~1 pm</td><td class="num">84.1 %</td><td class="num">70.5 %</td></tr>
+<tr><td class="num">6</td><td>NUCLEONS</td><td>S-32: 16 protons, 16 neutrons</td>
+    <td class="num">~8 fm</td><td class="num">90.0 %</td><td class="num">87.0 %</td></tr>
+<tr><td class="num">7</td><td>QUARKS</td><td>valence quarks and gluon flux</td>
+    <td class="num">~0.3 fm</td><td class="num">100.0 %</td><td class="num">95.0 %</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">The axis spans 14.477 decades, from 0.09 m to 3 × 10⁻¹⁶ m. &ldquo;Visible
+   from&rdquo; is where a station begins to fade in — these windows were re-cut on
+   6 September so that the nucleons emerge at 87 % instead of 75 %, and the quarks no
+   longer crowd them at 86 %.</p>
+
+<h3>Pacing</h3>
+<p>A separate curve multiplies the trigger rate without moving a single station — the
+   ladder's <em>width</em> is fixed by physics, but its <em>duration</em> is authorable.</p>
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Depth</th><th class="num">Speed</th><th>Intent</th></tr></thead>
+<tbody>
+<tr><td class="num">0 – 5 %</td><td class="num">1.00×</td><td>establishing</td></tr>
+<tr><td class="num">9 – 16 %</td><td class="num">0.45×</td><td>travelling into the mushroom</td></tr>
+<tr><td class="num">24 – 74 %</td><td class="num">1.00×</td><td>cell, protein, molecule</td></tr>
+<tr><td class="num">79 – 87 %</td><td class="num">0.55×</td><td>the long approach in near-darkness</td></tr>
+<tr><td class="num">90 – 95 %</td><td class="num">0.18×</td><td>nucleons resolve from a point</td></tr>
+<tr><td class="num">100 %</td><td class="num">0.45×</td><td>quarks stay calm</td></tr>
+</tbody>
+</table>
+</div>
+<p>On top of the curve sit <em>detents</em>: near an authored depth the descent gets heavy
+   so the presenter can settle on a beat and talk over it. Deliberately a damping factor,
+   never a stop — holding the trigger always pulls through.</p>
+
+<h3>The MET169 chapter and the CH4 redox cycle</h3>
+<p>The scientific core of the piece. Methionine-169 in the NirA protein carries a sulfur
+   atom that acts as a redox switch. Two enzyme partners visit it on a 30-second loop:</p>
+<div class="scroll">
+<table>
+<thead><tr><th class="num">Time</th><th>Event</th></tr></thead>
+<tbody>
+<tr><td class="num">0 – 2 s</td><td>carrier (FmoB) fades in</td></tr>
+<tr><td class="num">10.8 s</td><td>docks — delivers</td></tr>
+<tr><td class="num">12 – 14 s</td><td>collector (MsrA) fades in</td></tr>
+<tr><td class="num">21 – 23 s</td><td>carrier has arrived at its destination and fades out</td></tr>
+<tr><td class="num">25.8 s</td><td>release — collects</td></tr>
+<tr><td class="num">28 – 30 s</td><td>collector fades out, finishing exactly at the loop end</td></tr>
+</tbody>
+</table>
+</div>
+<p>The motion comes from a Sequencer track that is <em>scrubbed</em> by the reaction clock
+   rather than played — so it freezes when the station is off screen and inherits the
+   descent's own pacing. The presence windows are aligned to the animation's key times, not
+   to guessed phases: the carrier's fade-out begins the moment it stops moving.</p>
+<p>All NirA geometry was exported <strong>MET169-centred</strong> — the residue sits on the
+   coordinate origin by construction, and the protein body is positioned around it. Any
+   re-alignment therefore moves the protein, never the methionine.</p>
+
+<h2>4 — Assets and materials</h2>
+<div class="grid g3">
+  <div class="card"><div class="kpi">164<small>master materials</small></div></div>
+  <div class="card"><div class="kpi">276<small>material instances</small></div></div>
+  <div class="card"><div class="kpi">11<small>Niagara systems</small></div></div>
+</div>
+<div class="grid g3">
+  <div class="card"><div class="kpi">62<small>static meshes</small></div></div>
+  <div class="card"><div class="kpi">8<small>skeletal meshes</small></div></div>
+  <div class="card"><div class="kpi">13<small>levels (1 persistent + sublevels)</small></div></div>
+</div>
+
+<h3>How the show drives materials</h3>
+<p>Every station's materials expose the same small set of scalars, and the pawn writes
+   them once per frame from one cached table of dynamic instances, built at BeginPlay:</p>
+<div class="scroll">
+<table>
+<thead><tr><th>Parameter</th><th>Written by</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>StationFade</code></td><td>ladder</td><td>the station's own visibility band</td></tr>
+<tr><td><code>StationDissolve</code></td><td>ladder</td><td>gate multiplier, 1 = present</td></tr>
+<tr><td><code>SeqFade</code></td><td>reaction clock</td><td>the CH4 intro and courier presence</td></tr>
+<tr><td><code>Brightness</code></td><td>Material Parameter Collection</td>
+    <td>keyframed in Sequencer via <code>MPC_M169</code></td></tr>
+<tr><td><code>TunnelOrigin</code>, <code>TunnelInnerCos</code>, <code>TunnelOuterCos</code></td>
+    <td>pawn</td><td>the world-space &ldquo;drill&rdquo; cone</td></tr>
+</tbody>
+</table>
+</div>
+<p>Brightness deserves a note for Monday: it is driven from a Material Parameter
+   Collection, which means Markos can keyframe the glow of the methionine, the carrier and
+   the collector independently on an existing Sequencer track — <code>met_bright</code>,
+   <code>car_bright</code>, <code>col_bright</code> — without touching code.</p>
+
+<h3>The probability-volume shader</h3>
+<p>The MET169 hull carries a purpose-built master with five registers, switchable live and
+   blendable between neighbours: <strong>Rim</strong> (Fresnel), <strong>Cloud</strong>
+   (drifting 3D noise, density rather than membrane), <strong>Heatmap</strong> (viewing
+   thickness through a spectral ramp), <strong>Iso-bands</strong> (contour lines of
+   density — the scientific register), and <strong>Point cloud</strong> (stipple density as
+   probability of presence). Rim is the current default. This is the visual language
+   question worth putting to Karl and Alejandro on Monday.</p>
+
+<h2>5 — Performance</h2>
+
+<h3>The bisection menu</h3>
+<p>Rather than guessing, the show carries a live measurement instrument: a menu that
+   switches one cost axis at a time while the frame time is on screen. Every axis is
+   replicated across both cluster nodes, so wall and floor stay identical.</p>
+<div class="scroll">
+<table>
+<thead><tr><th>Axis</th><th>Values</th><th>Show default</th></tr></thead>
+<tbody>
+<tr><td>Render resolution</td><td>100 / 75 / 60 / 50 / 25 %</td><td>60 %</td></tr>
+<tr><td>Imposter count</td><td>0 / 40 / 80</td><td>0 (off)</td></tr>
+<tr><td>Imposter glow</td><td>0 / 2 / 8 / 24</td><td>0</td></tr>
+<tr><td>MET169 variant</td><td>W1 atoms / hull</td><td>hull</td></tr>
+<tr><td>Hull shading</td><td>5 registers</td><td>Rim</td></tr>
+<tr><td>Cell material</td><td>translucent / TSR-dither</td><td>TSR-dither</td></tr>
+<tr><td>Shader level, Nanite, particles, animation, NirA, 8K simulation</td>
+    <td>on / off</td><td>on</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>What was actually costing frames — and what it turned out to be</h3>
+<p>Two findings from the last two weeks are worth repeating, because both were
+   counter-intuitive and both cost real time to locate.</p>
+
+<h4>The &ldquo;grainy dissolve&rdquo; was never the dissolve</h4>
+<p>For weeks the fade in and out of every station showed a fine, sandpaper-like grain.
+   Frequency tuning, detail-noise amplitude, LOD dithering, filler particles, z-fighting
+   and the drill cone were all investigated and all ruled out. The actual cause was
+   structural: a <em>masked</em> material with noise added to its opacity mask and a clip
+   value <em>is</em> a dither by construction. The fade was the source. The fix was to let
+   temporal anti-aliasing resolve it (<code>DitherTemporalAA</code>), rolled out across the
+   cell and structure masters — and, for the cell, an alternative genuinely translucent
+   material with no threshold at all.</p>
+
+<h4>GPU particle systems need authored bounds</h4>
+<p>The orbital filler particles were intermittently visible on the wall <em>or</em> the
+   floor but never both, and later disappeared entirely. The cause was not culling
+   settings, not materials, not the cluster configuration and not multi-GPU. GPU-simulated
+   Niagara emitters cannot compute their own bounds; they fall back to a fixed box whose
+   default is ±100 <em>local</em> units. At the fillers' component scale that is ±1 and
+   ±0.1 world units — boxes that fail almost every per-view frustum test, the smaller one
+   first. The pawn now sets real bounds at runtime, because the editor-side setting is not
+   serialised.</p>
+
+<h3>Standing performance risk</h3>
+<blockquote>
+  <p>&ldquo;Leider haben wir, was die Performance angeht, an gewissen Stellen immer noch
+     ein Problem.&rdquo;</p>
+  <cite>Melinda File, after the Deep Space test on 21 August 2026</cite>
+</blockquote>
+<p>The 60 % resolution default and the imposters-off default are the two largest levers
+   already pulled. The bisection menu exists precisely so that the next test can name the
+   remaining hot spot instead of describing it.</p>
+
+<h2>6 — Tooling and workflow</h2>
+<p>The project is driven far more by scripted editor operations than by hand-editing.
+   <strong>521 Python scripts</strong> sit in <code>dev/</code>, each one a single,
+   documented operation executed against the running editor over a remote bridge —
+   material construction, asset import, actor placement, tag management, measurement
+   probes, and C++ source patches.</p>
+<p>Two working rules have emerged from expensive mistakes and are now standard:</p>
+<ul>
+  <li><strong>Measure, then act.</strong> Probe scripts print the state before any change
+      and verify it afterwards. Several long detours in this project came from acting on a
+      plausible theory instead of a measurement.</li>
+  <li><strong>Version, never delete.</strong> Deleting a referenced material instance once
+      silently reset fifteen mesh slots to the default grid material. New versions get new
+      names.</li>
+</ul>
+<p>Source control is Git with LFS for binary assets; 131 commits, with the Quantum Zoom
+   work beginning in late May 2026.</p>
+
+<h2>7 — What was done when</h2>
+<ul class="tl">
+<li><span class="d">27 May 2026</span><span class="t">Niagara controller, performance
+    monitor, per-node title cards<em>first Quantum Zoom groundwork in the Deep Space
+    starter project</em></span></li>
+<li><span class="d">10 Jun 2026</span><span class="t">Orbital controller, chapter-1
+    blockout meshes, title-card fades</span></li>
+<li><span class="d">11 Jun 2026</span><span class="t">Orbital nebula VDB volume; cluster
+    configuration for the venue</span></li>
+<li><span class="d">18 Jun 2026</span><span class="t">Gamepad operator HUD, cluster-verified;
+    live control of orbital parameters<em>the show becomes operable by one person with a
+    controller</em></span></li>
+<li><span class="d">9 Jul 2026</span><span class="t">The scale-stage zoom system — first
+    commit of the fixed-camera pawn<em>the architectural decision the whole piece rests
+    on</em></span></li>
+<li><span class="d">29 Jul 2026</span><span class="t">Nanite switcher, free-look, molecular
+    hull; cluster fixes</span></li>
+<li><span class="d">30 Jul 2026</span><span class="t">Log-spaced stations at true scale;
+    mycelium inserted as station 1; CH4 redox cycle with scientifically corrected docking
+    positions; FmoB and MsrA at true proportion; tag-driven station lighting; the
+    communication layer<em>the single most productive day in the project's history —
+    eleven commits</em></span></li>
+<li><span class="d">30 Jul 2026</span><span class="t">Conidium replaces the
+    animal-proportioned cell at station 2<em>a scientific correction with visible
+    consequences</em></span></li>
+<li><span class="d">12 Aug 2026</span><span class="t">Chapter 5 ladder, orbital detail,
+    camera-dissolve gate</span></li>
+<li><span class="d">18 Aug 2026</span><span class="t">Demo of the first chapters to the
+    scientific advisors<em>Karl Jansen, Alejandro Saenz, Joseph Strauss,
+    Sofia-Maria Satanakis</em></span></li>
+<li><span class="d">21 Aug 2026</span><span class="t">Deep Space test — performance problems
+    reported<em>the finding that drove the next two weeks</em></span></li>
+<li><span class="d">24 Aug 2026</span><span class="t">Performance bisection menu, idle orbit,
+    honest FPS readout<em>measurement instead of guesswork</em></span></li>
+<li><span class="d">28 Aug 2026</span><span class="t">MET169 show polish: organic materials,
+    story brightness, cluster sync, bisect axes; gluon Y-junction; chaos strings</span></li>
+<li><span class="d">28 Aug 2026</span><span class="t">Live test in Deep Space</span></li>
+<li><span class="d">29 Aug 2026</span><span class="t">The diet, the true scale, and a title
+    card with depth<em>asset budget brought down</em></span></li>
+<li><span class="d">3 Sep 2026</span><span class="t">Festival preparation: airy orbitals,
+    sulfur accent</span></li>
+<li><span class="d">4 Sep 2026</span><span class="t">Safe mode, real LODs, Markos'
+    colours<em>the night before the wall</em></span></li>
+<li><span class="d">5 Sep 2026</span><span class="t">60 % resolution as the show default;
+    imposters off; new post-production preset with an L-aware vignette; MET169 hull package
+    imported and made switchable; probability-volume shader with five registers; the
+    grainy-fade root cause found and fixed</span></li>
+<li><span class="d">6 Sep 2026</span><span class="t">Carrier and collector rebuilt on the new
+    hull with their own material instances; NirA orbit repaired; sulfur atom aligned to the
+    zoom pivot; nucleon window re-cut to 87–95 %; courier fades bound to the animation;
+    GPU particle bounds fixed in code</span></li>
+</ul>
+
+<h2>8 — Open items going into Monday</h2>
+<div class="scroll">
+<table>
+<thead><tr><th>Item</th><th>Status</th><th>Note</th></tr></thead>
+<tbody>
+<tr><td>Colour palette — one distinct hue per scene</td>
+    <td><span class="tag warn">open</span></td>
+    <td>Markos' request from 2 September. Also: no black backgrounds — fog instead.</td></tr>
+<tr><td>Remaining performance hot spot</td>
+    <td><span class="tag warn">measuring</span></td>
+    <td>Bisection menu is in place; needs one more Deep Space session to name it.</td></tr>
+<tr><td>NirA protein placement</td>
+    <td><span class="tag warn">in hand</span></td>
+    <td>Being re-composed manually. The pipeline value is on record if a revert is wanted.</td></tr>
+<tr><td>Orbital filler particles</td>
+    <td><span class="tag ok">fixed, untested</span></td>
+    <td>Bounds now set in code; first verification is the next run.</td></tr>
+<tr><td>Translucent cell material</td>
+    <td><span class="tag ok">available</span></td>
+    <td>Selectable in the menu; TSR-dither is the current default.</td></tr>
+<tr><td>Courier fades</td>
+    <td><span class="tag ok">done</span></td>
+    <td>Carrier and collector overlap 14–21 s; tightening needs Sequencer key changes.</td></tr>
+<tr><td>Epic MegaGrant submission</td>
+    <td><span class="tag warn">discussion</span></td>
+    <td>Framing Quantum Zoom as a tool — an Unreal environment that turns real
+        quantum-chemistry output into a navigable scene.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>9 — A note on wording</h2>
+<p>Karl Jansen has already asked once for &ldquo;quantum computer&rdquo; to be replaced by
+   &ldquo;quantum system&rdquo; in public-facing text. Worth carrying that care into the
+   rehearsal narration: the piece visualises a quantum <em>system</em> — a molecule and its
+   nucleus — and the computational work behind it is a means, not the subject.</p>
+
+<footer>
+  <p>Quantum Zoom — Wilhelm Media in collaboration with Ars Electronica, Markos Kay, and
+     scientific advisors at DESY, HU Berlin, BOKU and ÖAW.<br>
+     Internal working document, generated 6 September 2026. Figures are read from the
+     project itself; the timeline is reconstructed from the commit history.</p>
+</footer>
+
+</div>
+</body>
+</html>

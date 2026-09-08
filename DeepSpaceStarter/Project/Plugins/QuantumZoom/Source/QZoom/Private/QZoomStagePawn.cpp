@@ -37,6 +37,7 @@
 #include "Components/ExponentialHeightFogComponent.h"
 #include "Components/SkyAtmosphereComponent.h"
 #include "NiagaraComponent.h"
+#include "NiagaraSystem.h"   // GetAsset()->GetName() im PARTIKEL-Menue
 #include "QHudText.h"
 #include "Blueprint/UserWidget.h"
 
@@ -197,7 +198,7 @@ void AQZoomStagePawn::BeginPlay()
 
 	// The show boots in whatever HUD state is authored (default 0 = clean). Before this, the HUD
 	// was always on at start and Y only ever hid it.
-	HUDMode = FMath::Clamp(HUDMode, 0, 2);
+	HUDMode = FMath::Clamp(HUDMode, 0, 5);
 	bCleanMode = (HUDMode == 0);
 	SetCleanMode(bCleanMode);
 
@@ -207,6 +208,27 @@ void AQZoomStagePawn::BeginPlay()
 	// NVMe + big GPUs; give the SVT streamer real headroom. Runs on EVERY node (BeginPlay is per-process).
 	if (IConsoleVariable* CvBW = IConsoleManager::Get().FindConsoleVariable(TEXT("r.SparseVolumeTexture.Streaming.BandwidthLimit")))
 		CvBW->Set(FMath::Max(SVTBandwidthMiB, 512), ECVF_SetByConsole);
+
+	// SHOW-DEFAULTS ANWENDEN. Beides sind Zustaende, die bisher nur ein
+	// Tastendruck oder ein Cluster-Event hergestellt hat - als blosser
+	// Header-Default waeren sie wirkungslos geblieben: r.ScreenPercentage
+	// stuende auf dem Engine-Wert, der Imposter auf dem im Asset
+	// gespeicherten EmissiveAmt. Laeuft auf JEDEM Node (BeginPlay ist pro
+	// Prozess), genau wie das Bandbreiten-Limit darueber.
+	// MELINDA: die beim letzten RESTART bestaetigte Aufloesung ueberlebt in der Datei.
+	{
+		int32 Saved = 0;
+		if (GConfig && GConfig->GetInt(TEXT("QuantumZoom"), TEXT("ResPct"), Saved, GGameUserSettingsIni) && Saved >= 10 && Saved <= 100)
+			ResPct = Saved;
+		MelResPct = ResPct;
+	}
+	ApplyResPct();
+	// MEMBRAN-Seite: Indizes JETZT setzen, nicht erst beim ersten [A].
+	// Sonst ist MembIdx beim Oeffnen der Seite leer und die Zeilen-
+	// Schleife druckt gar nichts - die Seite sah aus wie kaputt.
+	if (MembIdx.Num() != 8) MembIdx = { 1, 1, 3, 2, 1, 0, 0, 2 };
+	// 8.0 / x2 / 8.0 / x1 / 8.0 / mit Station - der Stand im Level am 08.09.
+	if (PartIdx.Num() != 6) PartIdx = { 5, 5, 5, 3, 5, 0 };
 
 	// PIE only: become the view. In a cluster the nDisplay DCRA renders — do NOT possess (the pawn just
 	// ticks + broadcasts). Input polling works either way via GetFirstPlayerController on the primary.
@@ -443,6 +465,7 @@ void AQZoomStagePawn::BeginPlay()
 		const double T0 = FPlatformTime::Seconds();
 		InitFillers();          // scientific space fillers (F cycles off/motes/grid/structures)
 		const double T1 = FPlatformTime::Seconds();
+		ApplyCellMaterial();    // vor dem Cache: sonst haelt er DMIs des alten Slots
 		BuildMaterialCache();   // every DMI up front, so the per-frame path only SETS parameters
 		const double T2 = FPlatformTime::Seconds();
 		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] BeginPlay: InitFillers %.1f ms | BuildMaterialCache %.1f ms"),
@@ -452,6 +475,7 @@ void AQZoomStagePawn::BeginPlay()
 	PrevZoom = ZoomProgress;
 
 	ApplyStations();
+	ApplyParticleMenu();   // einmalig: Groessen setzen, Caches fuellen
 	UpdateReadout();
 	UpdateInfoLayer();
 }
@@ -510,6 +534,24 @@ void AQZoomStagePawn::Tick(float Dt)
 	}
 	const double B1 = FPlatformTime::Seconds();
 	ApplyStations();    // every node (secondaries got ZoomProgress/orbit via the event)
+	// IMPOSTER-SICHTBARKEIT ZULETZT. ApplyStations blendet die Kinder der
+	// aktiven Station wieder ein - und die Imposter haengen als Kinder an
+	// Station 2. Stand TickImposters davor (so war es), hat ApplyStations
+	// das Verstecken im selben Frame wieder aufgehoben und AMOUNT 0 blieb
+	// wirkungslos. Wer die Sichtbarkeit durchsetzen will, muss zuletzt
+	// schreiben.
+	if (UWorld* ImpW = GetWorld(); ImpW && ImpW->IsGameWorld())
+		// Nachbinden, solange nichts getroffen wurde - die Zellen liegen in
+		// einem gestreamten Sublevel, das bei BeginPlay noch fehlen kann.
+		if (CellMatComps == 0) ApplyCellMaterial();
+	TickM169Variant();
+	TickDepthCutoff();
+	TickPionPulse();   // PulseAmp der Kernstation faehrt mit dem Zoom hoch
+	TickOrbitalScale();// Orbital-Sprites: Modus "konstant" braucht jeden Frame die aktuelle Skala
+	TickSpawnAmounts();// heroSpawn / OXYamount - auch aus einer laufenden Sequencer-Spur
+	// Die Membran-Werte jeden Frame nachschreiben: ApplyStations kann die
+	// DMI jederzeit neu aufsetzen, dann waeren sie sonst wieder weg.
+	ApplyMembraneParams();
 	const double B2 = FPlatformTime::Seconds();
 
 	// Cluster-consistent visual velocity from the synced ZoomProgress delta (valid on every node).
@@ -601,6 +643,7 @@ void AQZoomStagePawn::Tick(float Dt)
 	UpdateGuides();      // authoring aid: fixed front-facing marker + zoom-centre reticle at the Anchor
 	ApplyNiraShells();   // hide SM_S2_NirA's enclosing ribbon/VOLUME so they don't obscure MET169
 	ApplyPalette();      // squeeze the hue spread toward the amber/blue poles (Back/Start, R3 = reset)
+	TickQuarkReveal();   // Quarks: eigene Rampe, damit sie erst mit dem Abgang der Nukleonen kommen
 	UpdateQuarkTriad(Dt);// S7: valence quarks wander, gluon strings are rebuilt to follow them
 	UpdateCH4Cycle(Dt);  // CH4: FmoB docks + oxidises Met169, reductase strips it back. Loops.
 	UpdateCH4Energy(Dt); // and the activation/deactivation shell that reads off the same beats
@@ -815,7 +858,25 @@ void AQZoomStagePawn::PollInput(float Dt)
 	const bool bDn = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Down)  || PC->IsInputKeyDown(EKeys::O);
 	const bool bLf = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Left)  || PC->IsInputKeyDown(EKeys::J);
 	const bool bRt = PC->IsInputKeyDown(EKeys::Gamepad_DPad_Right) || PC->IsInputKeyDown(EKeys::K);
-	if (HUDMode == 2)
+	if (HUDMode == 3)
+	{
+		// MEMBRAN-Seite: EIGENER Cursor, damit der PERF-Cursor stehenbleibt,
+		// wenn man zwischen den Seiten wechselt.
+		const int32 NM = 8;
+		if (bUp && !bUpPrev)   MembSel = (MembSel + NM - 1) % NM;
+		if (bDn && !bDownPrev) MembSel = (MembSel + 1) % NM;
+	}
+	else if (HUDMode == 5)
+	{
+		if (bUp && !bUpPrev)   MelSel = (MelSel + 10) % 11;
+		if (bDn && !bDownPrev) MelSel = (MelSel + 1) % 11;
+	}
+	else if (HUDMode == 4)
+	{
+		if (bUp && !bUpPrev)   PartSel = (PartSel + 5) % 6;
+		if (bDn && !bDownPrev) PartSel = (PartSel + 1) % 6;
+	}
+	else if (HUDMode == 2)
 	{
 		// MUTE MENU is modal on the D-Pad: Up/Down move the cursor. The preset/filler bindings are
 		// deliberately swallowed — cycling a PP preset or rebuilding the fillers mid-bisect would
@@ -823,7 +884,7 @@ void AQZoomStagePawn::PollInput(float Dt)
 		// +1: unter den Stationszeilen liegt die SAFE-MODE-Zeile. Der Cursor laeuft ueber
 		// NRows+1 Positionen; Position NRows IST die Safe-Zeile.
 		const int32 NRows = FMath::Clamp(StationCount, 1, 9);
-		const int32 NSel  = NRows + 1;
+		const int32 NSel  = NRows + 7;   // +SAFE, +NOISE, +DRILL, +RES, +MET169, +HULL SHADE, +CELL MAT   
 		if (bUp && !bUpPrev)   MuteSel = (MuteSel + NSel - 1) % NSel;
 		if (bDn && !bDownPrev) MuteSel = (MuteSel + 1) % NSel;
 		if (bRt && !bRightPrev)
@@ -898,15 +959,70 @@ void AQZoomStagePawn::PollInput(float Dt)
 	// A / B (face bottom/right) = filler DENSITY (moved off the shoulders). 5 levels, sparse -> EXTREME.
 	// In the MUTE MENU they are the menu's instead: A toggles the selected row, B unmutes everything.
 	const bool bA = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Bottom), bB = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Right);
-	if (HUDMode == 2)
+	if (HUDMode == 3 && bA && !bAPrev)
+	{
+		static const int32 Counts[8] = { 2, 4, 4, 4, 4, 3, 3, 4 };
+		if (MembIdx.Num() == 8)
+		{
+			const int32 S = FMath::Clamp(MembSel, 0, 7);
+			MembIdx[S] = (MembIdx[S] + 1) % Counts[S];
+			ApplyMembraneParams();
+		}
+	}
+	if (HUDMode == 5)
+	{
+		// MELINDA: A auf einer Prozentzeile = Wahl bestaetigen, A auf RESTART = neu starten.
+		if (bA && !bAPrev)
+		{
+			if (MelSel < 10)
+			{
+				MelResPct = (MelSel + 1) * 10;
+				UE_LOG(LogTemp, Warning, TEXT("[QZoomMelinda] Aufloesung gewaehlt: %d%% (wirksam beim RESTART)"), MelResPct);
+			}
+			else RestartShow();
+		}
+	}
+	else if (HUDMode == 2)
 	{
 		if (bA && !bAPrev)
 		{
 			const int32 NSafeRow = FMath::Clamp(StationCount, 1, 9);
-			if (MuteSel >= NSafeRow)
+			if (MuteSel == NSafeRow)
 			{
 				bSafeMode = !bSafeMode;
 				ApplySafeMode();
+			}
+			else if (MuteSel == NSafeRow + 1)
+			{
+				bNoiseOff = !bNoiseOff;
+				ApplyCheapMats();
+			}
+			else if (MuteSel == NSafeRow + 2)
+			{
+				bDrillFadeOn = !bDrillFadeOn;
+				ApplyCheapMats();
+			}
+			else if (MuteSel == NSafeRow + 3)
+			{
+				ResPctIdx = (ResPctIdx + 1) % 5;
+				{ static const int32 Steps[5] = { 100, 75, 60, 50, 25 }; ResPct = Steps[ResPctIdx]; }
+				ApplyResPct();
+			}
+			else if (MuteSel == NSafeRow + 4)
+			{
+				M169VariantIdx = (M169VariantIdx + 1) % 2;
+				UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] MET169 %s"),
+					M169VariantIdx ? TEXT("HUELLE") : TEXT("W1"));
+			}
+			else if (MuteSel == NSafeRow + 5)
+			{
+				HullShadeIdx = (HullShadeIdx + 1) % 5;
+				ApplyHullShading();
+			}
+			else if (MuteSel >= NSafeRow + 6)
+			{
+				CellMatIdx = (CellMatIdx + 1) % 2;
+				ApplyCellMaterial();
 			}
 			else
 			{
@@ -919,6 +1035,18 @@ void AQZoomStagePawn::PollInput(float Dt)
 		{
 			StationMuteMask = 0;
 			UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] all rows unmuted"));
+		}
+	}
+	else if (HUDMode == 4)
+	{
+		// PARTIKEL: A eine Stufe groesser, B eine kleiner. Anzahl-Zeilen starten das
+		// System neu, sonst greift eine neue Spawn-Zahl erst beim naechsten Loop.
+		if (PartIdx.Num() == 6 && ((bA && !bAPrev) || (bB && !bBPrev)))
+		{
+			static const int32 Counts[6] = { 10, 8, 10, 8, 10, 2 };
+			const int32 S = FMath::Clamp(PartSel, 0, 5);
+			PartIdx[S] = FMath::Clamp(PartIdx[S] + ((bA && !bAPrev) ? 1 : -1), 0, Counts[S] - 1);
+			ApplyParticleMenu(S == 1 || S == 3);
 		}
 	}
 	else
@@ -944,12 +1072,21 @@ void AQZoomStagePawn::PollInput(float Dt)
 	const bool bY = PC->IsInputKeyDown(EKeys::Gamepad_FaceButton_Top);
 	if (bY && !bYPrev)
 	{
-		HUDMode = (HUDMode + 1) % 3;
+		// REIHENFOLGE als Tabelle: MELINDA (5) kommt als erste Seite nach clean, ohne die
+		// HUDMode-Nummern im Code umzunummerieren.
+		{
+			static const int32 Order[6] = { 0, 5, 1, 2, 3, 4 };   // clean / MELINDA / HUD / PERF / MEMBRAN / PARTIKEL
+			int32 Pos = 0;
+			for (int32 i = 0; i < 6; ++i) if (Order[i] == HUDMode) Pos = i;
+			HUDMode = Order[(Pos + 1) % 6];
+		}
 		bCleanMode = (HUDMode == 0);
 		SetCleanMode(bCleanMode);
 		ApplyPPPreset(PPPreset);   // the menu suspends the grade terms it cannot be read through
-		UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] HUD mode %d (%s)"), HUDMode,
-			HUDMode == 0 ? TEXT("clean") : HUDMode == 1 ? TEXT("HUD") : TEXT("MUTE MENU"));
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomStage] HUD mode %d (%s)"), HUDMode,
+			HUDMode == 0 ? TEXT("clean") : HUDMode == 1 ? TEXT("HUD")
+			: HUDMode == 2 ? TEXT("PERF BISECT") : HUDMode == 3 ? TEXT("MEMBRAN")
+			: HUDMode == 4 ? TEXT("PARTIKEL") : TEXT("MELINDA"));
 	}
 	bYPrev = bY;
 
@@ -1032,14 +1169,27 @@ void AQZoomStagePawn::Broadcast()
 	Event.Parameters.Add(TEXT("lpit"),  FString::SanitizeFloat(LookPitch));      // (floor is a separate node, no PollInput)
 	Event.Parameters.Add(TEXT("mute"),  FString::FromInt(StationMuteMask));      // perf-bisect: every node drops the same rows
 	Event.Parameters.Add(TEXT("hudm"),  FString::FromInt(HUDMode));              // Y-cycle state (clean / HUD / mute menu)
-	Event.Parameters.Add(TEXT("msel"),  FString::FromInt(MuteSel));              // menu cursor, so the wall highlights the same row
+	Event.Parameters.Add(TEXT("msel"),  FString::FromInt(MuteSel));
+	Event.Parameters.Add(TEXT("psel"),  FString::FromInt(PartSel));               // PARTIKEL-Cursor
+	Event.Parameters.Add(TEXT("pidx"),  FString::FromInt(PartIdx.Num() == 6       // sechs Stufen, eine Zahl
+		? PartIdx[0] * 100000 + PartIdx[1] * 10000 + PartIdx[2] * 1000
+		+ PartIdx[3] * 100 + PartIdx[4] * 10 + PartIdx[5] : 555350));              // menu cursor, so the wall highlights the same row
 	Event.Parameters.Add(TEXT("simp"),  FString::FromInt(ShaderLevel));            // shader TIER 0/1/2: every node must swap or the compare is meaningless
 	Event.Parameters.Add(TEXT("c4p"),   FString::SanitizeFloat(CH4Phase));         // the reaction clock: floor + wall must scrub the same frame
 	Event.Parameters.Add(TEXT("c4r"),   FString::FromInt(bCH4Running ? 1 : 0));
 	Event.Parameters.Add(TEXT("pmut"),  FString::FromInt(bParticlesMuted ? 1 : 0)); // particle bisect axis: all nodes drop them together
 	Event.Parameters.Add(TEXT("amut"),  FString::FromInt(bAnimMuted ? 1 : 0));      // CH4 split: the animation half
 	Event.Parameters.Add(TEXT("nmut"),  FString::FromInt(bNirAMuted ? 1 : 0));      // CH4 split: the NirA half
-	Event.Parameters.Add(TEXT("safe"),  FString::FromInt(bSafeMode ? 1 : 0));       // SAFE MODE: jedes Node schaltet sein eigenes Buendel
+	Event.Parameters.Add(TEXT("safe"),  FString::FromInt(bSafeMode ? 1 : 0));
+	Event.Parameters.Add(TEXT("nzof"),  FString::FromInt(bNoiseOff ? 1 : 0));
+	Event.Parameters.Add(TEXT("drlf"),  FString::FromInt(bDrillFadeOn ? 1 : 0));
+	Event.Parameters.Add(TEXT("resp"),  FString::FromInt(ResPct));                 // seit 08.09. Prozent, nicht Stufe
+	Event.Parameters.Add(TEXT("mres"),  FString::FromInt(MelResPct));              // MELINDA: bestaetigte Wahl
+	Event.Parameters.Add(TEXT("msl5"),  FString::FromInt(MelSel));
+	Event.Parameters.Add(TEXT("rst"),   FString::FromInt(RestartSeq));             // MELINDA: Neustart-Zaehler
+	Event.Parameters.Add(TEXT("m169"),  FString::FromInt(M169VariantIdx));
+	Event.Parameters.Add(TEXT("hsh"),   FString::FromInt(HullShadeIdx));
+	Event.Parameters.Add(TEXT("cmat"),  FString::FromInt(CellMatIdx));
 	Event.Parameters.Add(TEXT("noff"),  FString::FromInt(bNaniteOff ? 1 : 0));      // Nanite axis: a per-node cvar,
 	                                                                               // so every node must be told
 	IDisplayCluster::Get().GetClusterMgr()->EmitClusterEventJson(Event, false);
@@ -1081,6 +1231,19 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	if (const FString* Lp = E.Parameters.Find(TEXT("lpit")))  LookPitch = FCString::Atof(**Lp);
 	if (const FString* Mu = E.Parameters.Find(TEXT("mute")))  StationMuteMask = FCString::Atoi(**Mu);   // ApplyStations below picks it up
 	if (const FString* Ms = E.Parameters.Find(TEXT("msel")))  MuteSel = FCString::Atoi(**Ms);
+	if (const FString* Ps = E.Parameters.Find(TEXT("psel")))  PartSel = FCString::Atoi(**Ps);
+	if (const FString* Pi = E.Parameters.Find(TEXT("pidx")))
+	{
+		const int32 V = FCString::Atoi(**Pi);
+		TArray<int32> New = { (V / 100000) % 10, (V / 10000) % 10, (V / 1000) % 10,
+			                      (V / 100) % 10, (V / 10) % 10, V % 10 };
+		if (New != PartIdx)
+		{
+			const bool bCount = PartIdx.Num() != 6 || New[1] != PartIdx[1] || New[3] != PartIdx[3];
+			PartIdx = New;
+			ApplyParticleMenu(bCount);
+		}
+	}
 	if (const FString* Sp = E.Parameters.Find(TEXT("simp")))
 	{
 		// carries the TIER now, not a flag — 0/1/2. An older node sending 0/1 still lands on
@@ -1109,6 +1272,48 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 		// ueberschreiben - dann gaebe es nichts mehr zu restaurieren.
 		if (bNewSafe != bSafeMode) { bSafeMode = bNewSafe; ApplySafeMode(); }
 	}
+	if (const FString* Nz = E.Parameters.Find(TEXT("nzof")))
+	{
+		const bool bNew = (FCString::Atoi(**Nz) != 0);
+		if (bNew != bNoiseOff) { bNoiseOff = bNew; ApplyCheapMats(); }
+	}
+	if (const FString* Df = E.Parameters.Find(TEXT("drlf")))
+	{
+		const bool bNew = (FCString::Atoi(**Df) != 0);
+		if (bNew != bDrillFadeOn) { bDrillFadeOn = bNew; ApplyCheapMats(); }
+	}
+	if (const FString* Rp = E.Parameters.Find(TEXT("resp")))
+	{
+		const int32 NewPct = FMath::Clamp(FCString::Atoi(**Rp), 10, 100);
+		if (NewPct != ResPct) { ResPct = NewPct; ApplyResPct(); }
+	}
+	if (const FString* Mr = E.Parameters.Find(TEXT("mres")))  MelResPct = FMath::Clamp(FCString::Atoi(**Mr), 10, 100);
+	if (const FString* M5 = E.Parameters.Find(TEXT("msl5")))  MelSel = FMath::Clamp(FCString::Atoi(**M5), 0, 10);
+	if (const FString* Rs = E.Parameters.Find(TEXT("rst")))
+	{
+		// Jeder Node laedt neu, wenn der Zaehler springt - auch der Primary, der hier
+		// seinen eigenen Event empfaengt. Vorher die Aufloesung sichern, damit der
+		// neue BeginPlay sie aus der Datei liest.
+		const int32 Seq = FCString::Atoi(**Rs);
+		if (Seq != RestartSeen)
+		{
+			RestartSeen = Seq;
+			ResPct = MelResPct;
+			ReloadMap();
+		}
+	}
+	if (const FString* Mv = E.Parameters.Find(TEXT("m169")))
+		M169VariantIdx = FMath::Clamp(FCString::Atoi(**Mv), 0, 1);
+	if (const FString* Hs = E.Parameters.Find(TEXT("hsh")))
+	{
+		const int32 NewIdx = FMath::Clamp(FCString::Atoi(**Hs), 0, 4);
+		if (NewIdx != HullShadeIdx) { HullShadeIdx = NewIdx; ApplyHullShading(); }
+	}
+	if (const FString* Cm = E.Parameters.Find(TEXT("cmat")))
+	{
+		const int32 NewIdx = FMath::Clamp(FCString::Atoi(**Cm), 0, 1);
+		if (NewIdx != CellMatIdx) { CellMatIdx = NewIdx; ApplyCellMaterial(); }
+	}
 	if (const FString* Am = E.Parameters.Find(TEXT("amut"))) bAnimMuted = (FCString::Atoi(**Am) != 0);
 	if (const FString* Nm = E.Parameters.Find(TEXT("nmut"))) bNirAMuted = (FCString::Atoi(**Nm) != 0);
 	// r.Nanite is a PER-NODE console variable, so a bisect that only switched the primary would
@@ -1116,8 +1321,11 @@ void AQZoomStagePawn::OnClusterEvent(const FDisplayClusterClusterEventJson& E)
 	// (idempotent), same reasoning as the diagnostic above.
 	if (const FString* No = E.Parameters.Find(TEXT("noff")))
 	{
-		bNaniteOff = (FCString::Atoi(**No) != 0);
-		ApplyNaniteOff();
+		// NUR BEI AENDERUNG. Das Event kommt jeden Frame; vorher lief hier
+		// pro Frame ein CVar-Set und ein Log-Write - 5776 Zeilen pro Lauf.
+		// Idempotent in der Wirkung, aber nicht in den Kosten.
+		const bool bNew = (FCString::Atoi(**No) != 0);
+		if (bNew != bNaniteOff) { bNaniteOff = bNew; ApplyNaniteOff(); }
 	}
 	if (const FString* Hm = E.Parameters.Find(TEXT("hudm")))
 	{
@@ -1870,6 +2078,72 @@ void AQZoomStagePawn::ApplyShaderLevel(int32 Level)
 		Names[FMath::Clamp(Level, 0, 2)], NSwap, NKept, NVol);
 }
 
+// DIE QUARKS FREIGEBEN. Sie haengen an der Station des Focus-Protons, damit sie mit ihm
+// wachsen und in ihm bleiben - sichtbar werden sollen sie aber erst, wenn die Nukleonen
+// gehen. Also nach ApplyStations noch einmal drueber: Actors mit QZQuarkReveal bekommen
+// die Stationsfade MAL einer eigenen Rampe ueber QuarkRevealStart..End.
+//
+// Reihenfolge ist Absicht: ApplyStations schreibt zuerst die volle Stationsfade, diese
+// Passe korrigiert sie. Derselbe Weg, den die CH4-Enzyme fuer ihre Anwesenheit nehmen -
+// ein Mechanismus weniger, den jemand spaeter suchen muss.
+void AQZoomStagePawn::TickQuarkReveal()
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+	static const FName TAG_REVEAL(TEXT("QZQuarkReveal"));
+
+	const float A = FMath::Min(QuarkRevealStart, QuarkRevealEnd - 0.0005f);
+	const float B = FMath::Max(QuarkRevealEnd, A + 0.0005f);
+	const float Reveal = FMath::SmoothStep(A, B, ZoomProgress);
+	const float StFade = StationFadeCache.IsValidIndex(QuarkStation)
+	                   ? StationFadeCache[QuarkStation] : 0.f;
+	const float Vis = StFade * Reveal;
+
+	// Der Core laeuft ueber DIESELBE Passe, nur andersherum: er ist ab 89 Prozent
+	// da und geht ueber CoreFadeStart..End, bevor seine Huelle die Linse erreicht.
+	static const FName TAG_COREFADE(TEXT("QZCoreFade"));
+	const float CA = FMath::Min(CoreFadeStart, CoreFadeEnd - 0.0005f);
+	const float CB = FMath::Max(CoreFadeEnd, CA + 0.0005f);
+	const float CoreVis = StFade * (1.f - FMath::SmoothStep(CA, CB, ZoomProgress));
+
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		AActor* A2 = *It;
+		const bool bCore = A2->Tags.Contains(TAG_COREFADE);
+		if (!bCore && !A2->Tags.Contains(TAG_REVEAL)) continue;
+		const float V2 = bCore ? CoreVis : Vis;
+		// Unter der Schwelle ganz aus dem Bild - eine Fade von 0 laesst maskierte
+		// Materialien zwar wegclippen, kostet aber weiter Draws und Simulation.
+		const bool bOff = (V2 <= 0.002f);
+		const bool bWasOff = A2->IsHidden();
+		if (bWasOff != bOff) A2->SetActorHiddenInGame(bOff);
+
+		// PARTIKEL POPPEN, WEIL SIE IM VERSTECKTEN WEITERLAUFEN. Ein verstecktes
+		// Niagara simuliert weiter; im Moment des Einblendens steht es voll da.
+		// Ob ein Emitter StationFade ueberhaupt auswertet, entscheidet er selbst -
+		// darauf ist kein Verlass. Also: versteckt = deaktiviert, und beim Auftauchen
+		// zuruecksetzen, damit das System bei null Partikeln beginnt und sich mit
+		// seiner eigenen Spawnrate fuellt.
+		TInlineComponentArray<UNiagaraComponent*> NCs;
+		A2->GetComponents(NCs);
+		for (UNiagaraComponent* NC : NCs)
+		{
+			if (!NC) continue;
+			if (bOff)
+			{
+				if (NC->IsActive()) NC->DeactivateImmediate();
+			}
+			else if (bWasOff)
+			{
+				NC->ResetSystem();   // leer starten - das ist der organische Aufbau
+				NC->Activate(true);
+			}
+		}
+		if (bOff) continue;
+		SetStationFade(A2, V2);
+	}
+}
+
 void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 {
 	if (!bQuarkMotion) return;
@@ -1897,12 +2171,17 @@ void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 		for (const FName& T : A->Tags)
 		{
 			const FString Ts = T.ToString();
-			if (Ts.StartsWith(TEXT("QZQuark")))
+			// DER REST MUSS EINE ZAHL SEIN. Atoi("Reveal") ist 0 - und damit hat sich am
+			// 08.09. jeder Actor mit dem Tag QZQuarkReveal als Quark 0 ausgegeben. Gewonnen
+			// hat der letzte in der Reihenfolge, ein Niagara-Actor im Ursprung: der erste
+			// Gluon-Strang lief von der Mitte zu einem Quark, den es nicht gab.
+			// Der Licht-Parser weiter oben prueft aus genau diesem Grund schon auf IsNumeric.
+			if (Ts.StartsWith(TEXT("QZQuark")) && Ts.Mid(7).IsNumeric())
 			{
 				const int32 i = FCString::Atoi(*Ts.Mid(7));
 				if (i >= 0 && i < 3) Q[i] = A;
 			}
-			else if (Ts.StartsWith(TEXT("QZGluon")))
+			else if (Ts.StartsWith(TEXT("QZGluon")) && Ts.Mid(7).IsNumeric())
 			{
 				const int32 i = FCString::Atoi(*Ts.Mid(7));
 				if (i >= 0 && i < 3) G[i] = A;
@@ -1967,6 +2246,14 @@ void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 		const FVector D = B0 - A0;
 		const float Len = D.Size();
 		if (Len < 1.f) continue;
+
+		// MESSZEILE STRAENGE, eine Sekunde Abstand, alle drei im selben Frame.
+		if (LightDiagFrame == GFrameCounter)
+			UE_LOG(LogTemp, Warning,
+				TEXT("[QZoomTriad] e=%d quark=%s pos=(%.0f %.0f %.0f) J=(%.0f %.0f %.0f) len=%.0f ")
+				TEXT("beam=%s hidden=%d scaleZ=%.2f"),
+				e, *Q[e]->GetName(), Pos[e].X, Pos[e].Y, Pos[e].Z, J.X, J.Y, J.Z, Len,
+				*Beam->GetName(), Beam->IsHidden() ? 1 : 0, Len / 100.f);
 
 		// The beam mesh is the engine cylinder: 100 uu long, centred, running down its local Z.
 		// So aim Z along the line and scale Z by length/100 — the mesh itself never changes.
@@ -2177,6 +2464,20 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 		}
 	}
 
+	// DIE FASSUNG HAT VORRANG VOR DER ANWESENHEIT. UpdateCH4Cycle laeuft NACH
+	// TickM169Variant und schreibt die Sichtbarkeit zuletzt. Ohne diese
+	// Schranke wuerde ein anwesender Kurier seine Huellen-Kinder auch in der
+	// W1-Fassung einblenden - und umgekehrt den W1-Koerper in der Huelle.
+	// Was die aktive Fassung nicht zeigt, bleibt weg, egal wer sonst schreibt.
+	auto VariantSuppressed = [this](AActor* X) -> bool
+	{
+		static const FName TW1(TEXT("QZM169W1"));
+		static const FName THull(TEXT("QZM169Hull"));
+		const bool bHullMode = (M169VariantIdx == 1);
+		if (X->Tags.Contains(TW1))   return bHullMode;
+		if (X->Tags.Contains(THull)) return !bHullMode;
+		return false;
+	};
 	for (TActorIterator<AActor> It(W); It; ++It)
 	{
 		AActor* A = *It;
@@ -2206,10 +2507,11 @@ void AQZoomStagePawn::UpdateCH4Cycle(float Dt)
 		// left all eight on screen for the rest of the descent — a molecule floating through the
 		// nucleus. Same reason the fade has to reach them: their materials are StationFade-masked.
 		const bool bHide = (Vis <= 0.002f);
-		A->SetActorHiddenInGame(bHide);
+		A->SetActorHiddenInGame(bHide || VariantSuppressed(A));
 		TArray<AActor*> Kids;
 		A->GetAttachedActors(Kids, true, /*recursive=*/true);
-		for (AActor* Ch : Kids) Ch->SetActorHiddenInGame(bHide);
+		for (AActor* Ch : Kids)
+			Ch->SetActorHiddenInGame(bHide || VariantSuppressed(Ch));
 		if (!bHide)
 		{
 			SetStationFade(A, Vis);
@@ -2410,6 +2712,7 @@ void AQZoomStagePawn::ApplyStations()
 			}
 			if (TunnelAxis.IsNearlyZero()) TunnelAxis = (Anchor - CamLoc).GetSafeNormal();
 			if (TunnelAxis.IsNearlyZero()) TunnelAxis = GetActorForwardVector();
+			TunnelOrigin = CamLoc;
 			const float GateMul = (Handover.IsValidIndex(N) && Handover[N].bEnabled)
 			                    ? Handover[N].NearDissolve : 1.f;
 			SetStationFade(A, Fade, GateMul);
@@ -2515,6 +2818,62 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// the FString overload is deprecated and was the one C4996 in this build.
 			NC->SetVariableFloat(FName(TEXT("StationFade")), Fade);
 
+			static const FName TAG_NBOUNDS(TEXT("QZNiagaraBounds"));
+			// FESTE BOUNDS NACHZIEHEN. Der Default von +/-100 lokal ist bei einer
+			// Komponenten-Skalierung von 0.001 eine Box von 0.2 uu Kantenlaenge -
+			// die faellt praktisch jedem Frustum-Test zum Opfer. Im Editor gesetzt
+			// haelt der Wert nicht: SetSystemFixedBounds wird nicht serialisiert.
+			// Also hier, wo er jeden Start und jeden Node erreicht.
+			if (A->Tags.Contains(TAG_NBOUNDS))
+			{
+				// NICHT einmalig: die Station skaliert exponentiell, beim ersten Tick
+				// ist sie mikroskopisch (Skalierung ~1e-5) und die lokale Box wuerde
+				// auf 15 Millionen gerechnet und dann nie wieder angefasst. Also pro
+				// Frame aus der AKTUELLEN Skalierung - ein Set pro Komponente, billig.
+				const float CS = FMath::Max(NC->GetComponentScale().X, 1e-6f);
+				const float Hf = FMath::Max(NiagaraBoundsWorldRadius, 1.f) / CS;
+				const FBox Cur = NC->GetSystemFixedBounds();
+				if (!Cur.IsValid || FMath::Abs(Cur.Max.X - Hf) > Hf * 0.25f)
+				{
+					NC->SetSystemFixedBounds(FBox(FVector(-Hf), FVector(Hf)));
+					UE_LOG(LogTemp, Warning,
+						TEXT("[QZoomStage] Niagara-Bounds '%s': lokal +/-%.0f (= %.1f uu in der Welt)"),
+						*A->GetName(), Hf, Hf * CS);
+				}
+			// ZUSTAND JEDE SEKUNDE, nur fuer getaggte Filler. Ein Verdacht ohne
+			// Messung hat in diesem Projekt schon zu oft in die Irre gefuehrt.
+			if (A->Tags.Contains(TAG_NBOUNDS))
+			{
+				const double Now = FPlatformTime::Seconds();
+				double& Last = NiagaraDiagLast.FindOrAdd(NC);
+				if (Now - Last > 1.0)
+				{
+					Last = Now;
+					float Ps = -1.f, Gs = -1.f, Sf = -1.f;
+					// erster gefundener der drei Namen
+					for (const TCHAR* Nm : { TEXT("User.ParticleScale_Orbitals"), TEXT("User.ParticleScale_Exchange"), TEXT("User.ParticleScale") })
+					{
+						// GetParameterValue liefert in 5.7 void - Existenz vorher ueber IndexOf pruefen
+						const FNiagaraVariable Var(FNiagaraTypeDefinition::GetFloatDef(), FName(Nm));
+						if (NC->GetOverrideParameters().IndexOf(Var) != INDEX_NONE)
+						{
+							NC->GetOverrideParameters().GetParameterValue(Ps, Var);
+							break;
+						}
+					}
+					NC->GetOverrideParameters().GetParameterValue(Gs, FNiagaraVariable(FNiagaraTypeDefinition::GetFloatDef(), FName(TEXT("User.ParticleGlowScale"))));
+					NC->GetOverrideParameters().GetParameterValue(Sf, FNiagaraVariable(FNiagaraTypeDefinition::GetFloatDef(), FName(TEXT("User.StationFade"))));
+					const FBox B = NC->GetSystemFixedBounds();
+					UE_LOG(LogTemp, Warning,
+						TEXT("[QZoomFill] %s zoom=%.0f%% active=%d hidden=%d owner-hidden=%d fade=%.3f scale=%.5f bounds=+/-%.0f (%.1f uu) PScale=%.2f Glow=%.1f"),
+						*A->GetName(), ZoomProgress * 100.f, NC->IsActive() ? 1 : 0,
+						NC->bHiddenInGame ? 1 : 0, A->IsHidden() ? 1 : 0, Sf,
+						NC->GetComponentScale().X, B.IsValid ? B.Max.X : 0.f,
+						B.IsValid ? B.Max.X * NC->GetComponentScale().X : 0.f, Ps, Gs);
+				}
+			}
+			}
+
 			// User.StationScale — the OTHER half of "scaleable". Component scale only reaches
 			// particles whose emitters are in Local Space; a world-space emitter keeps its
 			// authored size while the world around it grows by orders of magnitude. Publishing
@@ -2542,7 +2901,17 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			const float PScaleMul = bParticleScaleTracksZoom ? FMath::Max(GateScale, 1e-4f) : 1.f;
 			if (!bKeepScale)
 			{
-				NC->SetVariableFloat(FName(TEXT("ParticleScale")),     ParticleScale     * PScaleMul);
+				// DREI NAMEN. Michael hat ParticleScale in den Systemen aufgeteilt:
+				// Orbitals lesen ParticleScale_Orbitals, Exchange liest
+				// ParticleScale_Exchange, die Filler weiter ParticleScale. Ein Write
+				// auf einen Namen, den das System nicht kennt, findet nichts - also
+				// alle drei, statt pro System zu raten.
+				{
+					const float PS = ParticleScale * PScaleMul;
+					NC->SetVariableFloat(FName(TEXT("ParticleScale")),          PS);
+					NC->SetVariableFloat(FName(TEXT("ParticleScale_Orbitals")), PS);
+					NC->SetVariableFloat(FName(TEXT("ParticleScale_Exchange")), PS);
+				}
 				NC->SetVariableFloat(FName(TEXT("ParticleGlowScale")), ParticleGlowScale * PScaleMul);
 			}
 			// FESTE WELTGROESSE - nur fuer AUSDRUECKLICH mit QZKeepScale getaggte Systeme.
@@ -2559,7 +2928,25 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 			// Ort, an dem die Vererbung ueberschrieben wird.
 			else if (bFillerFixedScale && A->Tags.Contains(TAG_KEEPSCALE))
 			{
-				NC->SetWorldScale3D(FVector(FMath::Max(FillerFixedScale, 1e-4f)));
+				// SEIT 04.09.: Ausdehnung erbt die Station, nur die SPRITES bleiben
+				// konstant. Das Festnageln der Weltskala (SetWorldScale3D) war das
+				// Missverstaendnis - es fror das ganze System ein. Die Kette
+				// multipliziert User.ParticleScale mit der Weltskala, also wird sie
+				// hier wieder herausgeteilt: netto konstante Spritegroesse auf Wand
+				// und Floor, waehrend das Spawn-Volumen mit der Station waechst.
+				// KORREKTUR 04.09. NACHMITTAG: KEINE Gegenkompensation. Die Emitter
+				// laufen im World-Space - Positionen erben die Stationsskala (System
+				// bleibt 1:1 im Orbital), die Spritegroesse ist absolut und haengt NUR
+				// am User-Parameter. Die Division durch die Weltskala hat den Parameter
+				// beim Reinzoomen aktiv geschrumpft - genau Michaels Beobachtung.
+				// Also: Parameter schlicht KONSTANT halten.
+				// Relativ-Skala NICHT anfassen: die Filler sind mit einer eigenen
+				// Relativ-Skala autoriert (Volumen passend zum Orbital). Das Stampfen
+				// auf 1 hat sie am 04.09. auf ein Fuenftel schrumpfen lassen.
+				NC->SetVariableFloat(FName(TEXT("ParticleScale")),
+					ParticleScale     * FMath::Max(FillerFixedScale, 1e-4f));
+				NC->SetVariableFloat(FName(TEXT("ParticleGlowScale")),
+					ParticleGlowScale * FMath::Max(FillerFixedScale, 1e-4f));
 			}
 			// Farbe getrennt vom Rest schaltbar - siehe TAG_KEEPCOLOR.
 			const bool bKeepColor = bKeepStyle || A->Tags.Contains(TAG_KEEPCOLOR);
@@ -2599,15 +2986,27 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 					                                   FName(TEXT("Color_2")),
 					                                   FName(TEXT("Color_3")) };
 					const int32 W   = QuarkColorWheel.Num();
-					const float Per = FMath::Max(QuarkColorPeriodDeg, 1.f);
-					const float Ph  = FMath::Fmod(FillerSwirl, Per) / Per;
+					// Zeit statt FillerSwirl: der Swirl steht bei Stillstand, und mit ihm
+					// stand die Farbe. Ein Radschritt pro QuarkColorCycleSec; Weltzeit ist
+					// unter nDisplay cluster-synchron, also keine zweite Uhr im System.
+					const float StepSec = FMath::Max(QuarkColorCycleSec, 0.2f);
+					const float Ph = FMath::Fmod(
+						(float)GetWorld()->GetTimeSeconds() / (StepSec * (float)W), 1.f);
 					for (int32 k = 0; k < 3; ++k)
 					{
 						const float t  = (Ph + (float)(QIdx + k) / 3.f) * (float)W;
 						const int32 i0 = ((int32)FMath::FloorToInt(t) % W + W) % W;
 						const int32 i1 = (i0 + 1) % W;
-						NC->SetVariableLinearColor(ColNames[k],
-							FMath::Lerp(QuarkColorWheel[i0], QuarkColorWheel[i1], FMath::Frac(t)));
+						const FLinearColor Col =
+							FMath::Lerp(QuarkColorWheel[i0], QuarkColorWheel[i1], FMath::Frac(t));
+						NC->SetVariableLinearColor(ColNames[k], Col);
+						// Der Kanal, den alle drei Filler nachweislich konsumieren, ist
+						// ParticleColor - Filler 1 kennt Color_1 gar nicht, 2/3 binden ihre
+						// Color_N nicht sichtbar (Disk-Scan 04.09.). QZKeepColor haelt nur den
+						// GLOBALEN Farb-Write fern; die Wheel-Farbe ist die eigene Stimme des
+						// Systems und geht als k==0-Phase direkt in ParticleColor.
+						if (k == 0)
+							NC->SetVariableLinearColor(FName(TEXT("ParticleColor")), Col);
 					}
 				}
 			}
@@ -2706,6 +3105,13 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 				// The cone, in world space so wall and floor share one opening.
 				DMI->SetVectorParameterValue(TEXT("TunnelAxis"),
 					FLinearColor(TunnelAxis.X, TunnelAxis.Y, TunnelAxis.Z, 0.f));
+				// URSPRUNG des Kegels, nicht nur seine Richtung. Ohne den kann ein
+				// Material den Kegel nur gegen die Blickrichtung testen - und die
+				// ist auf Wand und Boden verschieden, weshalb der Boden nie ein
+				// Loch bekam. Mit Ursprung UND Richtung ist der Kegel fuer beide
+				// Viewports derselbe Bereich im Raum.
+				DMI->SetVectorParameterValue(TEXT("TunnelOrigin"),
+					FLinearColor(TunnelOrigin.X, TunnelOrigin.Y, TunnelOrigin.Z, 0.f));
 				DMI->SetScalarParameterValue(TEXT("TunnelInnerCos"),
 					FMath::Cos(FMath::DegreesToRadians(FMath::Clamp(TunnelInnerDeg, 1.f, 89.f))));
 				DMI->SetScalarParameterValue(TEXT("TunnelOuterCos"),
@@ -2716,14 +3122,9 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 				// beiden Enden ab, das Netz soll aber monoton dichter werden, waehrend man
 				// hindurchfliegt. Der Tag grenzt es auf das Netz ein — dieselbe Zeile wuerde
 				// sonst NetAmount auf den Nukleonen ueberschreiben, die denselben Master teilen.
-				if (bNetSolidRamp && A->Tags.Contains(TAG_NETSOLID))
-				{
-					const float t = FMath::Clamp((ZoomProgress - NetSolidFrom)
-					                             / FMath::Max(NetSolidTo - NetSolidFrom, 1e-4f),
-					                             0.f, 1.f);
-					DMI->SetScalarParameterValue(TEXT("NetAmount"),
-						FMath::Lerp(NetAmountOpen, NetAmountSolid, t * t * (3.f - 2.f * t)));
-				}
+				// NETAMOUNT WIRD HIER NICHT MEHR GESCHRIEBEN. Michael animiert es
+				// selbst; der Code darf nicht dagegenhalten. Der Wert kommt jetzt
+				// allein aus der Material-Instanz.
 			}
 		}
 	}
@@ -3021,6 +3422,7 @@ void AQZoomStagePawn::UpdateLights()
 			// placement on the subject at every scale. Attenuation scales with it, because a
 			// radius in world units means nothing once the subject is 1500x bigger.
 			float IntensityMul = 1.f;
+			float LSDbg = -1.f, PowDbg = -1.f, AttDbg = -1.f;   // nur fuer die Messzeile
 			if (ScaleStation >= 0)
 			{
 				const float LS = FMath::Max(StationRenderScale(ScaleStation), 1e-6f);
@@ -3042,6 +3444,7 @@ void AQZoomStagePawn::UpdateLights()
 					float* rad = LightBaseRadius.Find(Key);
 					if (!rad) rad = &LightBaseRadius.Add(Key, PLC->AttenuationRadius);
 					PLC->SetAttenuationRadius(FMath::Max(*rad * LS, 1.f));
+					AttDbg = PLC->AttenuationRadius;
 				}
 
 				// INVERSE SQUARE. Moving the light out by S and widening its reach by S is only
@@ -3050,10 +3453,35 @@ void AQZoomStagePawn::UpdateLights()
 				// 1. Without this term the lab you art-directed goes quietly darker the further
 				// you descend, and no setting appears to have changed — which is the least
 				// debuggable kind of drift.
-				IntensityMul = FMath::Min(FMath::Pow(LS, LightScalePower),
+				// Der Exponent kommt von der Station, wenn sie einen eigenen gesetzt hat.
+				// Sonst der globale - so bleibt jede Ebene bei dem, womit sie eingerichtet wurde.
+				const float PowN = (Handover.IsValidIndex(ScaleStation)
+				                    && Handover[ScaleStation].LightScalePower >= 0.f)
+				                 ? Handover[ScaleStation].LightScalePower : LightScalePower;
+				IntensityMul = FMath::Min(FMath::Pow(LS, PowN),
 				                          FMath::Max(LightScaleMaxMul, 1.f));
+				LSDbg = LS; PowDbg = PowN;
 			}
 			LC->SetIntensity(*bp * sm * IntensityMul);
+
+			// MESSZEILE. Nur fuer die Nukleus-Lampen, eine Sekunde Abstand, alle fuenf im
+			// selben Frame - sonst liest man Werte aus verschiedenen Zeitpunkten nebeneinander.
+			if (A->Tags.Contains(FName(TEXT("QZLight7"))))
+			{
+				const double NowS = FPlatformTime::Seconds();
+				if (LightDiagFrame != GFrameCounter && NowS - LightDiagLast > 1.0)
+				{
+					LightDiagLast = NowS;
+					LightDiagFrame = GFrameCounter;
+				}
+				if (LightDiagFrame == GFrameCounter)
+					UE_LOG(LogTemp, Warning,
+						TEXT("[QZoomLight] %s zoom=%.0f%% st=%d fade=%.3f lit=%.3f sm=%.3f ")
+						TEXT("LS=%.6f pow=%.1f mul=%.6g base=%.0f -> I=%.1f att=%.0f hidden=%d"),
+						*A->GetName(), ZoomProgress * 100.f, ScaleStation, Fade, Lit, sm,
+						LSDbg, PowDbg, IntensityMul, *bp, *bp * sm * IntensityMul, AttDbg,
+						A->IsHidden() ? 1 : 0);
+			}
 		}
 		// Post-process volumes in a station sublevel fade too (Michael: "PP fades as well"): scale their
 		// BlendWeight by the station's visibility so the grade ramps in/out with the scene instead of popping.
@@ -3126,6 +3554,502 @@ float AQZoomStagePawn::PaceAt(float P) const
 		}
 	}
 	return 1.f;
+}
+
+void AQZoomStagePawn::ApplyCheapMats()
+{
+	// NOISE AUS als Material-Swap. Namenskonvention statt Tabelle: Slot-Material <X>
+	// wird getauscht, wenn /Game/QuantumZoom/VFX/cheap/MI_CHEAP_<X> existiert (das
+	// Editor-Skript hat die Familie auf die 56 additiven Instanzen beschnitten -
+	// opake Huellen auf Additiv zu tauschen wuerde Overdraw ERZEUGEN, nicht sparen).
+	// MIDs werden ueber ihren Parent aufgeloest - der Pawn wickelt Stage-Materialien
+	// in dynamische Instanzen, deren eigener Name nie matchen wuerde.
+	// Nichts davon wird gespeichert: reiner Laufzeitzustand, Restore aus CheapSaved.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	auto FindCheap = [&](UMaterialInterface* M) -> UMaterialInterface*
+	{
+		if (!M) return nullptr;
+		FName Key = M->GetFName();
+		if (const UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(M))
+			if (MID->Parent) Key = MID->Parent->GetFName();
+		FString KeyStr = Key.ToString();
+		if (KeyStr.StartsWith(TEXT("MI_CHEAP_"))) return nullptr;
+		if (CheapMiss.Contains(Key)) return nullptr;
+		if (TObjectPtr<UMaterialInterface>* Hit = CheapCache.Find(Key)) return Hit->Get();
+		const FString Path = FString::Printf(
+			TEXT("/Game/QuantumZoom/VFX/cheap/MI_CHEAP_%s.MI_CHEAP_%s"), *KeyStr, *KeyStr);
+		UMaterialInterface* Cheap = LoadObject<UMaterialInterface>(nullptr, *Path);
+		if (Cheap) CheapCache.Add(Key, Cheap); else CheapMiss.Add(Key);
+		return Cheap;
+	};
+	if (bNoiseOff && CheapSaved.Num() == 0)
+	{
+		int32 NComp = 0, NSlot = 0;
+		for (TActorIterator<AActor> It(W); It; ++It)
+		{
+			TArray<UMeshComponent*> MCs;
+			It->GetComponents<UMeshComponent>(MCs);
+			for (UMeshComponent* MC : MCs)
+			{
+				const int32 N = MC->GetNumMaterials();
+				bool bAny = false;
+				TArray<TWeakObjectPtr<UMaterialInterface>> Orig;
+				Orig.SetNum(N);
+				for (int32 i = 0; i < N; ++i)
+				{
+					UMaterialInterface* M = MC->GetMaterial(i);
+					Orig[i] = M;
+					if (UMaterialInterface* Cheap = FindCheap(M))
+					{
+						MC->SetMaterial(i, Cheap);
+						bAny = true;
+						++NSlot;
+					}
+				}
+				if (bAny) { CheapSaved.Add(MC, Orig); ++NComp; }
+			}
+		}
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] NOISE AUS: %d Slots auf %d Komponenten getauscht"),
+			NSlot, NComp);
+	}
+	else if (!bNoiseOff && CheapSaved.Num() > 0)
+	{
+		int32 NComp = 0;
+		for (auto& Pr : CheapSaved)
+		{
+			UMeshComponent* MC = Pr.Key.Get();
+			if (!MC) continue;
+			for (int32 i = 0; i < Pr.Value.Num(); ++i)
+				if (UMaterialInterface* M = Pr.Value[i].Get())
+					MC->SetMaterial(i, M);
+			++NComp;
+		}
+		CheapSaved.Empty();
+		UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] NOISE AUS beendet: %d Komponenten restauriert"), NComp);
+	}
+	if (!CheapMPC)
+		CheapMPC = LoadObject<UMaterialParameterCollection>(nullptr,
+			TEXT("/Game/QuantumZoom/VFX/cheap/MPC_QZCheap.MPC_QZCheap"));
+	if (CheapMPC)
+		UKismetMaterialLibrary::SetScalarParameterValue(W, CheapMPC,
+			FName("DrillOn"), bDrillFadeOn ? 1.f : 0.f);
+}
+
+// PARTIKEL-Stufen. Groesse absolut (User.ParticleScale, Stand im Level 3.0 = Stufe 2),
+// Anzahl als Faktor auf den autorierten Wert (Stufe 3 = x1). Stufen statt stufenlos -
+// ein Index laesst sich ueber den Cluster tragen, ein Float pro Frame nicht.
+const float AQZoomStagePawn::PartSizeSteps[10]  = { 1.f, 2.f, 3.f, 4.f, 6.f, 8.f, 12.f, 16.f, 24.f, 32.f };
+const float AQZoomStagePawn::PartCountSteps[8]  = { 0.25f, 0.5f, 0.75f, 1.f, 1.5f, 2.f, 3.f, 4.f };
+
+// DIE ANZAHLEN. Ein Wert, ein Schreiber: was in HeroSpawnAmount und OxyAmount steht -
+// von Hand, aus dem Menue oder aus einer Sequencer-Spur - landet hier in den Systemen.
+// Jeden Frame, damit eine laufende Sequenz durchgreift.
+//
+// NEUSTART. Speist die Zahl eine Spawn-RATE, wirkt eine Aenderung sofort und ein
+// Neustart waere nur ein Ruckler. Speist sie einen BURST, wirkt sie erst beim naechsten
+// Zyklus - dafuer bSpawnChangeRestarts. Die Schwelle von 0.5 % haelt Interpolations-
+// rauschen davon ab, jeden Frame neu zu starten; fuer echtes Umschalten Stufen-Keys.
+void AQZoomStagePawn::TickSpawnAmounts()
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+
+	// Die Systeme liegen in gestreamten Sublevels - beim ersten Tick sind sie
+	// vielleicht noch nicht da. Ein paar Versuche, dann Ruhe.
+	if (HeroComps.Num() == 0 && OrbitalComps.Num() == 0 && SpawnScanTries < 120)
+	{
+		++SpawnScanTries;
+		for (TActorIterator<AActor> It(W); It; ++It)
+		{
+			TInlineComponentArray<UNiagaraComponent*> NCs;
+			It->GetComponents(NCs);
+			for (UNiagaraComponent* NC : NCs)
+			{
+				if (!NC || !NC->GetAsset()) continue;
+				const FString Sys = NC->GetAsset()->GetName();
+				if (Sys.Contains(TEXT("MESH_HERO")))          HeroComps.AddUnique(NC);
+				else if (Sys == TEXT("N_Particle_Orbitals"))  OrbitalComps.AddUnique(NC);
+			}
+		}
+	}
+
+	auto Write = [this](UNiagaraComponent* NC, const TCHAR* Name, float Value)
+	{
+		if (!NC) return;
+		float* Last = SpawnApplied.Find(NC);
+		const bool bChanged = !Last || FMath::Abs(*Last - Value) > FMath::Max(FMath::Abs(Value) * 0.005f, 0.01f);
+		if (!bChanged) return;
+		SpawnApplied.Add(NC, Value);
+		NC->SetVariableFloat(FName(Name), Value);
+		if (bSpawnChangeRestarts) NC->ReinitializeSystem();
+	};
+
+	const float HeroNow = HeroSpawnAmount * (PartIdx.Num() == 6 ? PartCountSteps[FMath::Clamp(PartIdx[1], 0, 7)] : 1.f);
+	for (const TWeakObjectPtr<UNiagaraComponent>& P : HeroComps)    Write(P.Get(), TEXT("heroSpawn"), HeroNow);
+	for (const TWeakObjectPtr<UNiagaraComponent>& P : OrbitalComps) Write(P.Get(), TEXT("OXYamount"), OxyAmount);
+}
+
+// ORBITAL-GROESSE. Zwei Wege, per Menue umschaltbar:
+//   Modus 0 "mit Station"  - der Wert geht durch, wie autoriert. Richtig fuer Emitter
+//                            im World Space, deren Sprites die Stationsskala nicht erben.
+//   Modus 1 "konstant"     - geteilt durch die aktuelle Komponenten-Skalierung. Richtig
+//                            fuer Emitter im Local Space: die Kette multipliziert sie
+//                            wieder heran, netto bleibt die Sprite-Groesse ueber das
+//                            ganze Band gleich.
+// Welcher Fall vorliegt, sagt weder die Python-API noch das Asset lesbar - der
+// Umschalter zeigt es in zehn Sekunden an der Wand.
+void AQZoomStagePawn::TickOrbitalScale()
+{
+	if (OrbitalComps.Num() == 0 || PartIdx.Num() != 6) return;
+	// FAKTOR auf den Sequencer-Wert, nicht Absolutwert: die Stufentabelle endet bei 32,
+	// im Level stehen 50 - eine Absolutstufe haette den autorierten Wert gekappt.
+	const float Size = OrbitalSpriteScale * PartCountSteps[FMath::Clamp(PartIdx[4], 0, 7)];
+	const bool  bConst = PartIdx[5] != 0;
+	for (const TWeakObjectPtr<UNiagaraComponent>& P : OrbitalComps)
+	{
+		UNiagaraComponent* NC = P.Get();
+		if (!NC) continue;
+		float V = Size;
+		if (bConst)
+		{
+			const float CS = FMath::Max(NC->GetComponentScale().X, 1e-6f);
+			// Deckel: bei mikroskopischer Station waere der Quotient sonst astronomisch,
+			// und ein absurder Parameter ist schwerer zu erkennen als zu grosse Sprites.
+			V = FMath::Clamp(Size / CS, 0.01f, 10000.f);
+		}
+		NC->SetVariableFloat(FName(TEXT("ParticleScale_Orbitals")), V);
+		NC->SetVariableFloat(FName(TEXT("ParticleScale")),          V);
+	}
+}
+
+void AQZoomStagePawn::ApplyParticleMenu(bool bReinitCounts)
+{
+	if (PartIdx.Num() != 6) PartIdx = { 5, 3, 5, 3, 3, 0 };
+	UWorld* W = GetWorld();
+	if (!W) return;
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		TInlineComponentArray<UNiagaraComponent*> NCs;
+		It->GetComponents(NCs);
+		for (UNiagaraComponent* NC : NCs)
+		{
+			if (!NC || !NC->GetAsset()) continue;
+			const FString Sys = NC->GetAsset()->GetName();
+			const bool bHero = Sys.Contains(TEXT("MESH_HERO"));
+			const bool bBase = Sys.Contains(TEXT("MESH_BASE"));
+			// Die Orbitale an M169_OXY: eigene Groessenzeile, eigener Skalierungsmodus.
+			if (Sys == TEXT("N_Particle_Orbitals"))
+			{
+				OrbitalComps.AddUnique(NC);
+				continue;
+			}
+			if (!bHero && !bBase) continue;
+			const int32 SizeI = FMath::Clamp(PartIdx[bHero ? 0 : 2], 0, 9);
+			NC->SetVariableFloat(FName(TEXT("ParticleScale")), PartSizeSteps[SizeI]);
+			// Die ANZAHL gehoert seit dem Sequencer-Umbau TickSpawnAmounts - ein Wert,
+			// ein Schreiber. Hier nur noch merken, wer der Hero-Filler ist.
+			if (bHero) HeroComps.AddUnique(NC);
+			if (bReinitCounts) NC->ReinitializeSystem();
+		}
+	}
+	OrbitalComps.RemoveAll([](const TWeakObjectPtr<UNiagaraComponent>& P) { return !P.IsValid(); });
+	HeroComps.RemoveAll([](const TWeakObjectPtr<UNiagaraComponent>& P) { return !P.IsValid(); });
+	TickSpawnAmounts();
+	TickOrbitalScale();   // Groesse sofort setzen, nicht erst beim naechsten Frame
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomPart] HERO size %.1f x%.2f   BASE size %.1f x%.2f"),
+		PartSizeSteps[FMath::Clamp(PartIdx[0], 0, 9)], PartCountSteps[FMath::Clamp(PartIdx[1], 0, 7)],
+		PartSizeSteps[FMath::Clamp(PartIdx[2], 0, 9)], PartCountSteps[FMath::Clamp(PartIdx[3], 0, 7)]);
+}
+
+void AQZoomStagePawn::ApplyMembraneParams()
+{
+	// KEINE eigene MID mehr. Frueher hat diese Seite die Komponenten in eine
+	// eigene MID gewickelt - und damit die DMI ersetzt, in die der Pawn jeden
+	// Frame TunnelAxis, TunnelInnerCos/OuterCos und CamFadeStart/Range schreibt.
+	// Ohne Achse kein Kegel, ohne Kegel kein Loch: der Drill war tot, sobald
+	// diese Seite einmal gegriffen hatte.
+	// Jetzt schreibt sie ihre Werte in die vorhandene DMI der Station. Der Pawn
+	// behaelt die Hoheit; die Seite legt nur ihre Parameter obendrauf. Weil
+	// ApplyStations die DMI jederzeit neu aufsetzen kann, geschieht das jeden
+	// Frame statt nur auf Tastendruck.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	if (MembIdx.Num() != 8) MembIdx = { 1, 1, 3, 2, 1, 0, 0, 2 };
+	static const TCHAR* Names[8] = {
+		TEXT("DrillAmount"), TEXT("DrillSharp"), TEXT("CamFadeRange"),
+		TEXT("EdgeChunk"), TEXT("EdgeSharp"), TEXT("DetailAmount"),
+		TEXT("CellAmount"), TEXT("DissolveScale") };
+	static const float Vals[8][4] = {
+		{ 0.f, 1.f, 0.f, 0.f }, { 2.f, 8.f, 20.f, 60.f },
+		{ 50.f, 150.f, 300.f, 600.f }, { 0.15f, 0.30f, 0.45f, 0.70f },
+		{ 2.f, 8.f, 20.f, 60.f }, { 0.f, 0.15f, 0.35f, 0.f },
+		{ 0.f, 0.15f, 0.35f, 0.f },
+		{ 0.00006f, 0.00015f, 0.0004f, 0.0012f } };
+	int32 NComp = 0;
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		TArray<UMeshComponent*> MCs;
+		It->GetComponents<UMeshComponent>(MCs);
+		for (UMeshComponent* MC : MCs)
+			for (int32 sl = 0; sl < MC->GetNumMaterials(); ++sl)
+			{
+				UMaterialInstanceDynamic* D =
+					Cast<UMaterialInstanceDynamic>(MC->GetMaterial(sl));
+				if (!D || !D->Parent) continue;
+				if (!D->Parent->GetName().Contains(TEXT("Conidium_Clean"))) continue;
+				for (int32 r = 0; r < 8; ++r)
+					D->SetScalarParameterValue(FName(Names[r]),
+						Vals[r][FMath::Clamp(MembIdx[r], 0, 3)]);
+				++NComp;
+			}
+	}
+	if (NComp != MembMIDComps)
+	{
+		MembMIDComps = NComp;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[QZoomStage] MEMBRAN schreibt auf %d Slots"), NComp);
+	}
+}
+
+
+
+void AQZoomStagePawn::ApplyHullShading()
+{
+	// Das Basismaterial wird GELADEN, nicht aus dem Slot uebernommen.
+	// Vorher stand hier MC->GetMaterial(0) - also das, was zufaellig im
+	// Slot lag. Ueberlebt der Komponenten-Override das Speichern nicht,
+	// erbt die MID das Slot-Material des Meshes, kennt keinen Parameter
+	// Mode, und [V] schreibt ins Nichts: sichtbar, falsch, wirkungslos.
+	// Explizit laden ist genau das, was ApplyImposterGlow schon tut.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	if (HullMIDComps == 0)
+	{
+		if (!HullMID)
+		{
+			UMaterialInterface* Base = LoadObject<UMaterialInterface>(nullptr,
+				TEXT("/Game/QuantumZoom/ASSETS/3D_models/MET169_Hull/MI_QZ_ProbVolume.MI_QZ_ProbVolume"));
+			if (!Base)
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[QZoomPerf] MI_QZ_ProbVolume FEHLT - Huelle bleibt wie sie ist"));
+				return;
+			}
+			HullMID = UMaterialInstanceDynamic::Create(Base, this);
+			// Beweis statt Behauptung: kennt das Material den Regler ueberhaupt?
+			float Probe = -1.f;
+			const bool bHasMode = HullMID->GetScalarParameterValue(
+				FName(TEXT("Mode")), Probe);
+			UE_LOG(LogTemp, Warning,
+				TEXT("[QZoomPerf] Huellen-Basis %s | Parameter Mode %s (%.2f)"),
+				*Base->GetName(), bHasMode ? TEXT("JA") : TEXT("NEIN !!"), Probe);
+		}
+		// Jede Huelle bekommt die MID IHRER Instanz. Vorher lag hier eine
+		// einzige ueber allem mit QZM169Hull - dadurch fadeten Carrier und
+		// Collector mit der MET169-Helligkeit mit.
+		static const FName TAG_MET(TEXT("QZHullMET"));
+		static const FName TAG_CAR(TEXT("QZHullCAR"));
+		static const FName TAG_COL(TEXT("QZHullCOL"));
+		auto MakeMID = [this](const TCHAR* Path) -> UMaterialInstanceDynamic*
+		{
+			UMaterialInterface* B = LoadObject<UMaterialInterface>(nullptr, Path);
+			return B ? UMaterialInstanceDynamic::Create(B, this) : nullptr;
+		};
+		if (!HullMIDCar) HullMIDCar = MakeMID(
+			TEXT("/Game/QuantumZoom/ASSETS/3D_models/MET169_Hull/MI_QZ_ProbVolume_CAR.MI_QZ_ProbVolume_CAR"));
+		if (!HullMIDCol) HullMIDCol = MakeMID(
+			TEXT("/Game/QuantumZoom/ASSETS/3D_models/MET169_Hull/MI_QZ_ProbVolume_COL.MI_QZ_ProbVolume_COL"));
+		int32 NComp = 0;
+		for (const TWeakObjectPtr<AActor>& Wp : M169HullCache)
+		{
+			AActor* A = Wp.Get();
+			if (!A) continue;
+			// NUR wer eine Huellen-Rolle traegt, bekommt eine Huellen-MID.
+			// M169HullCache sammelt alles mit QZM169Hull - darin stecken auch
+			// die Dockbodies von Carrier und Collector, und die sollen ihr
+			// Schwefel-Material behalten. Ohne diese Schranke bekaemen sie die
+			// MET-Huellen-MID aufgedrueckt.
+			UMaterialInstanceDynamic* Use = nullptr;
+			if      (A->Tags.Contains(TAG_MET)) Use = HullMID;
+			else if (A->Tags.Contains(TAG_CAR)) Use = HullMIDCar;
+			else if (A->Tags.Contains(TAG_COL)) Use = HullMIDCol;
+			if (!Use) continue;
+			TArray<UMeshComponent*> MCs;
+			A->GetComponents<UMeshComponent>(MCs);
+			for (UMeshComponent* MC : MCs)
+			{
+				for (int32 i = 0; i < MC->GetNumMaterials(); ++i)
+					MC->SetMaterial(i, Use);
+				++NComp;
+			}
+		}
+		HullMIDComps = NComp;
+	}
+	if (!HullMID) return;
+	HullMID->SetScalarParameterValue(FName(TEXT("Mode")), (float)HullShadeIdx);
+	// Mode bleibt geteilt: die [V]-Zeile soll alle drei Huellen umschalten,
+	// sonst zerfaellt die visuelle Sprache zwischen den Molekuelen.
+	if (HullMIDCar) HullMIDCar->SetScalarParameterValue(FName(TEXT("Mode")), (float)HullShadeIdx);
+	if (HullMIDCol) HullMIDCol->SetScalarParameterValue(FName(TEXT("Mode")), (float)HullShadeIdx);
+	static const TCHAR* ShadeNames[5] = { TEXT("RIM"), TEXT("WOLKE"), TEXT("HEATMAP"), TEXT("ISO"), TEXT("PUNKTE") };
+	// zurueckgelesen, nicht angenommen
+	float Back = -1.f;
+	HullMID->GetScalarParameterValue(FName(TEXT("Mode")), Back);
+	UE_LOG(LogTemp, Warning,
+		TEXT("[QZoomPerf] HULL SHADE %s (an %d Komp., Mode zurueckgelesen %.2f)"),
+		ShadeNames[FMath::Clamp(HullShadeIdx, 0, 4)], HullMIDComps, Back);
+}
+
+
+void AQZoomStagePawn::TickM169Variant()
+{
+	// DER SCHALTER WAEHLT DEN KOERPER, NICHT DIE SICHTBARKEIT.
+	// Vorher wurden beide Mengen jeden Frame hart gesetzt, auch auf sichtbar -
+	// damit ueberschrieb der Schalter ApplyStations und die Huelle stand ueberall,
+	// auch am LAB. Die Stations-Logik behaelt jetzt das letzte Wort darueber, OB
+	// MET169 zu sehen ist; hier faellt nur die Entscheidung, WELCHER Koerper das
+	// dann ist. Bei den Impostern ist Erzwingen richtig, hier war es ein falsch
+	// uebertragenes Muster.
+	UWorld* W = GetWorld();
+	if (!W || !W->IsGameWorld()) return;
+	if (!bM169CacheTried || (M169W1Cache.Num() == 0 && M169HullCache.Num() == 0))
+	{
+		bM169CacheTried = true;
+		M169W1Cache.Reset();
+		M169HullCache.Reset();
+		M169GateActor = nullptr;
+		for (TActorIterator<AActor> It(W); It; ++It)
+		{
+			if (It->Tags.Contains(FName(TEXT("QZM169W1"))))   M169W1Cache.Add(*It);
+			if (It->Tags.Contains(FName(TEXT("QZM169Hull")))) M169HullCache.Add(*It);
+			if (It->Tags.Contains(FName(TEXT("QZM169Gate"))))  M169GateActor = *It;
+			// TAG, nicht Name: das Label M169_MET169_DOCKBODY existiert nur im
+			// Editor, der Actor heisst intern StaticMeshActor_8. Die alte
+			// Namenssuche konnte nie greifen - Beleg im Log: 'Taktgeber KEINER'.
+		}
+		if (M169W1Cache.Num() || M169HullCache.Num())
+			UE_LOG(LogTemp, Warning,
+				TEXT("[QZoomPerf] MET169-Cache: W1 %d, Huelle %d, Taktgeber %s"),
+				M169W1Cache.Num(), M169HullCache.Num(),
+				M169GateActor.IsValid() ? *M169GateActor->GetName() : TEXT("KEINER"));
+		// Register sofort anwenden, sobald es etwas zu faerben gibt.
+		if (M169HullCache.Num()) ApplyHullShading();
+	}
+	const bool bHull = (M169VariantIdx == 1);
+	AActor* Gate = M169GateActor.Get();
+	// Ohne Taktgeber wird die aktive Menge NICHT angefasst - dann entscheidet
+	// weiter allein die Stations-Logik. Lieber gar nicht sichtbar als falsch.
+	const bool bHaveGate = (Gate != nullptr);
+	const bool bStationShows = bHaveGate && !Gate->IsHidden();
+
+	for (const TWeakObjectPtr<AActor>& Wp : M169W1Cache)
+	{
+		AActor* A = Wp.Get();
+		if (!A) continue;
+		if (bHull)              A->SetActorHiddenInGame(true);      // inaktiv: hart weg
+		else if (bHaveGate)     A->SetActorHiddenInGame(!bStationShows);
+	}
+	for (const TWeakObjectPtr<AActor>& Wp : M169HullCache)
+	{
+		AActor* A = Wp.Get();
+		if (!A) continue;
+		if (!bHull)             A->SetActorHiddenInGame(true);      // inaktiv: hart weg
+		else if (bHaveGate)     A->SetActorHiddenInGame(!bStationShows);
+	}
+
+	// HELLIGKEIT DER HUELLE KOMMT AUS DEM SEQUENCER.
+	// Vorher wurde sie vom Schwefel abgelesen. Michael will sie selbst
+	// animieren, und das Werkzeug dafuer liegt schon bereit: MPC_M169 hat
+	// met_bright, und SEQ_M169_Hand hat einen Collection-Track. Der Pawn
+	// liest also nur noch ab, was der Sequencer dort hineinschreibt.
+	// HullBrightnessFollow bleibt der Faktor - die Huelle darf heller oder
+	// dunkler ziehen als die Atome, ohne dass die Kurve doppelt gepflegt wird.
+	if (HullMID && HullBrightnessFollow > 0.f)
+	{
+		// M169MPC gibt es bereits - der Pawn spiegelt darueber schon
+		// orbital_noise in die Niagara-Systeme. Dieselbe Collection, derselbe
+		// Handle: die Zuweisung im Details-Panel gilt fuer beides.
+		if (M169MPC)
+		{
+			// Drei Molekuele, drei Kurven. Carrier und Collector duerfen
+			// ausdruecklich NICHT mit der MET169-Helligkeit mitfaden.
+			auto Drive = [this](UMaterialInstanceDynamic* M, const TCHAR* P)
+			{
+				if (!M) return;
+				const float B = UKismetMaterialLibrary::GetScalarParameterValue(
+					this, M169MPC, FName(P));
+				M->SetScalarParameterValue(FName(TEXT("Brightness")),
+					B * HullBrightnessFollow);
+			};
+			Drive(HullMID,    TEXT("met_bright"));
+			Drive(HullMIDCar, TEXT("car_bright"));
+			Drive(HullMIDCol, TEXT("col_bright"));
+		}
+	}
+	// HUELLE AUSBLENDEN, SCHWEFEL BLEIBT. Nur Opacity auf der HullMID -
+	// der Schwefel haengt an einem anderen Material und bleibt stehen.
+	if (HullMID)
+	{
+		const float tf = FMath::Clamp((ZoomProgress - HullFadeFrom)
+		                              / FMath::Max(HullFadeTo - HullFadeFrom, 1e-4f),
+		                              0.f, 1.f);
+		const float sm = tf * tf * (3.f - 2.f * tf);
+		// Opacity bleibt geteilt - das Ausblenden beim Hineinzoomen gilt fuer
+		// die ganze Huellenschicht, nicht nur fuer MET169.
+		HullMID->SetScalarParameterValue(FName(TEXT("Opacity")), 1.f - sm);
+		if (HullMIDCar) HullMIDCar->SetScalarParameterValue(FName(TEXT("Opacity")), 1.f - sm);
+		if (HullMIDCol) HullMIDCol->SetScalarParameterValue(FName(TEXT("Opacity")), 1.f - sm);
+	}
+}
+
+
+// MELINDA RESTART. Die Map neu laden ist der einzige Neustart, der wirklich "wie beim
+// Launch" ist: Titelkarte, Sequencer, CH4-Uhr, Stationen, Partikel - alles aus BeginPlay.
+// Im Cluster springt der Zaehler im naechsten Event und JEDER Node laedt beim Empfang
+// (auch der Primary, der seinen eigenen Event bekommt). Ohne Cluster sofort.
+void AQZoomStagePawn::RestartShow()
+{
+	ResPct = MelResPct;
+	if (GConfig)
+	{
+		GConfig->SetInt(TEXT("QuantumZoom"), TEXT("ResPct"), ResPct, GGameUserSettingsIni);
+		GConfig->Flush(false, GGameUserSettingsIni);
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomMelinda] RESTART mit %d%% (%s)"), ResPct,
+		bInCluster ? TEXT("Cluster: Zaehler springt, jeder Node laedt neu") : TEXT("lokal: sofort"));
+	// Im Cluster NICHT sofort laden: OpenLevel reist erst im naechsten Frame, aber ob
+	// der Event mit dem neuen Zaehler vorher noch rausgeht, haengt von der Tick-
+	// Reihenfolge ab. Sicherer: nur den Zaehler springen lassen - der Primary empfaengt
+	// seinen eigenen Event und laedt dann mit allen anderen zusammen.
+	if (bInCluster) ++RestartSeq;
+	else ReloadMap();
+}
+
+void AQZoomStagePawn::ReloadMap()
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+	if (GConfig)
+	{
+		GConfig->SetInt(TEXT("QuantumZoom"), TEXT("ResPct"), FMath::Clamp(ResPct, 10, 100), GGameUserSettingsIni);
+		GConfig->Flush(false, GGameUserSettingsIni);
+	}
+	const FString Map = UGameplayStatics::GetCurrentLevelName(W, true);
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomMelinda] OpenLevel %s @ %d%%"), *Map, ResPct);
+	UGameplayStatics::OpenLevel(W, FName(*Map));
+}
+
+void AQZoomStagePawn::ApplyResPct()
+{
+	// Pixel sind bei 8K-Stereo der groesste Einzelposten: Screen Percentage skaliert
+	// die Shading-Arbeit quadratisch (50 % = ein Viertel der Pixel), TSR rechnet aufs
+	// Ziel zurueck. Reversibel per Definition - Stufe 0 ist 100 %.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	const int32 Pct = FMath::Clamp(ResPct, 10, 100);
+	GEngine->Exec(W, *FString::Printf(TEXT("r.ScreenPercentage %d"), Pct));
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] RESOLUTION %d%%"), Pct);
 }
 
 void AQZoomStagePawn::ApplySafeMode()
@@ -3413,6 +4337,128 @@ void AQZoomStagePawn::UpdateS3Focus()
 			SetStationFade(A, f);
 		}
 	}
+}
+
+// PulseAmp der Kernstation mit dem Zoom hochfahren. Siehe Kommentar im Header:
+// ein fester Wert blaest die Nukleonen beim Einblenden auf, weil die Station dann
+// noch mikroskopisch ist. Die Rampe multipliziert den AUTORIERTEN Wert je Material,
+// so behalten PrionArcs (50) und NEUTRON (22.8) ihr Verhaeltnis zueinander.
+void AQZoomStagePawn::TickPionPulse()
+{
+	UWorld* W = GetWorld();
+	if (!W) return;
+
+	// Cache einmal aufbauen. Die DMIs entstehen in BuildMaterialCache waehrend BeginPlay,
+	// also kann der erste Tick sie noch nicht sehen - ein paar Versuche, dann Ruhe.
+	// (Der Imposter-Cache hat genau hier jeden Frame neu gescannt; das nicht nochmal.)
+	if (PulseAmpBase.Num() == 0 && PulseScanTries < 120)
+	{
+		++PulseScanTries;
+		for (TActorIterator<AActor> It(W); It; ++It)
+		{
+			// NUR die Kernstation: M_NiraMaster haengt auch am NirA-Netz, und dessen
+			// Puls ist autoriert, nicht kaputt.
+			if (!It->GetName().StartsWith(TEXT("SM_S6_"))) continue;
+			TInlineComponentArray<UPrimitiveComponent*> Prims;
+			It->GetComponents(Prims);
+			for (UPrimitiveComponent* PC : Prims)
+			{
+				if (!PC) continue;
+				for (int32 m = 0; m < PC->GetNumMaterials(); ++m)
+				{
+					UMaterialInstanceDynamic* DMI = Cast<UMaterialInstanceDynamic>(PC->GetMaterial(m));
+					if (!DMI || PulseAmpBase.Contains(DMI)) continue;
+					float Authored = 0.f;
+					if (DMI->GetScalarParameterValue(FMaterialParameterInfo(TEXT("PulseAmp")), Authored)
+						&& Authored > 0.f)
+					{
+						PulseAmpBase.Add(DMI, Authored);
+					}
+				}
+			}
+		}
+		if (PulseAmpBase.Num() > 0)
+			UE_LOG(LogTemp, Warning, TEXT("[QZoomPulse] %d Materialien mit PulseAmp an der Kernstation"),
+				PulseAmpBase.Num());
+	}
+	if (PulseAmpBase.Num() == 0) return;
+
+	// Exponentiell, nicht linear: die Nukleonen wachsen exponentiell, und PulseAmp ist
+	// eine Verschiebung in Weltgroessen. Nur so bleibt der Puls derselbe ANTEIL der
+	// Geometrie - und startet damit wirklich bei praktisch null.
+	const float Ramp = FMath::Clamp(
+		FMath::Exp((ZoomProgress - PulseRampEnd) * FMath::Max(PulseRampK, 1.f)), 0.f, 1.f);
+	for (const TPair<TWeakObjectPtr<UMaterialInstanceDynamic>, float>& KV : PulseAmpBase)
+		if (UMaterialInstanceDynamic* DMI = KV.Key.Get())
+			DMI->SetScalarParameterValue(TEXT("PulseAmp"), KV.Value * Ramp);
+}
+
+void AQZoomStagePawn::TickDepthCutoff()
+{
+	// Der Tag QZOffAt<prozent> nimmt einen Actor ab einer Tiefe aus dem Bild.
+	// Nur verstecken, nie einblenden: so kann diese Passe mit der
+	// Stations-Logik nicht in einen Schreibstreit geraten.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	static const FString PREFIX(TEXT("QZOffAt"));
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		for (const FName& Tg : It->Tags)
+		{
+			const FString Ts = Tg.ToString();
+			if (!Ts.StartsWith(PREFIX)) continue;
+			const float Cut = FCString::Atof(*Ts.Mid(PREFIX.Len())) * 0.01f;
+			if (Cut > 0.f && ZoomProgress >= Cut)
+			{
+				It->SetActorHiddenInGame(true);
+				TArray<AActor*> Kids;
+				It->GetAttachedActors(Kids, true, /*recursive=*/true);
+				for (AActor* Ch : Kids) Ch->SetActorHiddenInGame(true);
+			}
+			break;
+		}
+	}
+}
+
+void AQZoomStagePawn::ApplyCellMaterial()
+{
+	// Getroffen wird ueber den Tag QZCellMat, nicht ueber den Namen. Der
+	// Griff nach einem Namensbestandteil ist in diesem Projekt schon einmal
+	// danebengegangen, weil interne Namen wie StaticMeshActor_8 lauten.
+	UWorld* W = GetWorld();
+	if (!W) return;
+	static const TCHAR* Paths[2] = {
+		TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/MI_QZ_Cell_Translucent_v2.MI_QZ_Cell_Translucent_v2"),
+		TEXT("/Game/QuantumZoom/BLOCKOUT/_mats/MI_QZ_Conidium_Clean_v5.MI_QZ_Conidium_Clean_v5") };
+	UMaterialInterface* Want = LoadObject<UMaterialInterface>(
+		nullptr, Paths[FMath::Clamp(CellMatIdx, 0, 1)]);
+	if (!Want) return;
+	static const FName TAG_CELL(TEXT("QZCellMat"));
+	int32 N = 0;
+	for (TActorIterator<AActor> It(W); It; ++It)
+	{
+		if (!It->Tags.Contains(TAG_CELL)) continue;
+		TArray<UMeshComponent*> MCs;
+		It->GetComponents<UMeshComponent>(MCs);
+		for (UMeshComponent* MC : MCs)
+			for (int32 i = 0; i < MC->GetNumMaterials(); ++i)
+			{
+				MC->SetMaterial(i, Want);
+				++N;
+			}
+	}
+	CellMatComps = N;
+	if (N > 0)
+	{
+		// Der Cache haelt DMIs der ALTEN Slots. Ohne Neubau schriebe der Pawn
+		// StationFade in Instanzen, die an keiner Komponente mehr haengen -
+		// die Zelle wuerde aufhoeren, mit der Station zu gehen.
+		bMatCacheBuilt = false;
+		MatCacheStations = 0;
+		BuildMaterialCache();
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[QZoomPerf] CELL MAT %s (an %d Slots)"),
+		CellMatIdx ? TEXT("TSR-DITHER") : TEXT("TRANSLUCENT"), N);
 }
 
 void AQZoomStagePawn::BuildMaterialCache()
@@ -3768,7 +4814,7 @@ void AQZoomStagePawn::UpdateReadout()
 	// (every frame) only for the two live modes, so the clean-mode hide is never overridden.
 	if (FpsBig)
 	{
-		const bool bWant = !bCleanMode && (HUDMode == 2 || (HUDMode == 1 && bShowFPS));
+		const bool bWant = !bCleanMode && (HUDMode >= 2 || (HUDMode == 1 && bShowFPS));
 		if (FpsBig->IsVisible() != bWant) FpsBig->SetVisibility(bWant);
 		if (bWant)
 			FpsBig->SetText(FText::FromString(FString::Printf(TEXT("%.0f | %.0f"),
@@ -3778,6 +4824,105 @@ void AQZoomStagePawn::UpdateReadout()
 	// ── MUTE MENU (HUDMode 2): the readout becomes the bisect panel. FPS is forced on here —
 	// the menu exists to watch frame time against the station list, so hiding it behind bShowFPS
 	// would defeat the mode. Early return: the editorial text below has no business overwriting this.
+	// ── MEMBRAN (HUDMode 3): die Regler der sauberen Membran, am Wall drehbar.
+	if (HUDMode == 3)
+	{
+		static const TCHAR* MembNames[8] = {
+			TEXT("DRILL AN/AUS"), TEXT("DRILL KANTE"), TEXT("DRILL TIEFE"),
+			TEXT("BROCKEN"),      TEXT("KANTE"),       TEXT("DETAIL"),
+			TEXT("ZELLMUSTER"), TEXT("RAUSCH-GROESSE") };
+		static const float MembVals[8][4] = {
+			{ 0.f, 1.f, 0.f, 0.f }, { 2.f, 8.f, 20.f, 60.f },
+			{ 50.f, 150.f, 300.f, 600.f }, { 0.15f, 0.30f, 0.45f, 0.70f },
+			{ 2.f, 8.f, 20.f, 60.f }, { 0.f, 0.15f, 0.35f, 0.f },
+			{ 0.f, 0.15f, 0.35f, 0.f },
+			{ 0.00006f, 0.00015f, 0.0004f, 0.0012f } };
+		FString Menu = FString::Printf(TEXT("MEMBRAN                       [Y] weiter\nFPS        %.0f  |  median %.0f\nDEPTH      %.0f%%\n"),
+			FpsCurrent, FpsMedian, ZoomProgress * 100.f);
+		if (MembIdx.Num() != 8) MembIdx = { 1, 1, 3, 2, 1, 0, 0, 2 };
+		for (int32 r = 0; r < 8; ++r)
+			{
+				const float V = MembVals[r][FMath::Clamp(MembIdx[r], 0, 3)];
+				Menu += FString::Printf(TEXT("\n%s %-14s %8.2f"),
+					(MembSel == r) ? TEXT(">") : TEXT("  "), MembNames[r], V);
+			}
+		Menu += TEXT("\n\n[A] Wert weiter   [DPad] waehlen   [Y] naechste Seite");
+		// PushHudText, nicht SetText: UQHudText hat kein SetText, und der
+		// PERF-Block publiziert genauso. Eine Ausgabestelle fuer alle Seiten.
+		PushHudText(Menu);
+		return;
+	}
+
+	// ── MELINDA (HUDMode 5): Aufloesung waehlen, RESTART. Erste Seite im Y-Zyklus.
+	if (HUDMode == 5)
+	{
+		FString Menu = FString::Printf(
+			TEXT("MELINDA MENU                       [Y] weiter\nFPS        %.0f  |  median %.0f\n\nQUANTUM ZOOM RESOLUTION      aktiv %d%%   gewaehlt %d%%\n"),
+			FpsCurrent, FpsMedian, ResPct, MelResPct);
+		for (int32 r = 0; r < 10; ++r)
+		{
+			const int32 Pct = (r + 1) * 10;
+			const bool bCur = (MelSel == r);
+			const bool bChosen = (Pct == MelResPct);
+			Menu += FString::Printf(TEXT("\n%s %s%3d%%%s%s"),
+				bCur ? TEXT(">>>") : TEXT("   "),
+				bChosen ? TEXT("[") : TEXT(" "), Pct, bChosen ? TEXT("]") : TEXT(" "),
+				bCur ? TEXT("  <<<   [A] bestaetigen") : (bChosen ? TEXT("        gewaehlt") : TEXT("")));
+		}
+		Menu += FString::Printf(TEXT("\n\n%s RESTART%s"),
+			(MelSel == 10) ? TEXT(">>>") : TEXT("   "),
+			(MelSel == 10) ? *FString::Printf(TEXT("  <<<   [A] Neustart im Titel mit %d%%"), MelResPct) : TEXT(""));
+		Menu += TEXT("\n\n[DPad] waehlen   [A] bestaetigen   [Y] naechste Seite");
+		PushHudText(Menu);
+		return;
+	}
+
+	// ── PARTIKEL (HUDMode 4): Groesse und Anzahl der MET169-Filler, am Wall drehbar.
+	if (HUDMode == 4)
+	{
+		static const TCHAR* Names[6] = { TEXT("HERO GROESSE"), TEXT("HERO ANZAHL"),
+		                                 TEXT("BASE GROESSE"), TEXT("BASE ANZAHL"),
+		                                 TEXT("ORBITAL GROESSE"), TEXT("ORBITAL SKALIERUNG") };
+		if (PartIdx.Num() != 6) PartIdx = { 5, 3, 5, 3, 3, 0 };
+		FString Menu = FString::Printf(TEXT("PARTIKEL MET169               [Y] weiter\nFPS        %.0f  |  median %.0f\nDEPTH      %.0f%%\n"),
+			FpsCurrent, FpsMedian, ZoomProgress * 100.f);
+		for (int32 r = 0; r < 6; ++r)
+		{
+			const int32 I = PartIdx[r];
+			const TCHAR* Cur = (PartSel == r) ? TEXT(">") : TEXT("  ");
+			if (r == 5)
+			{
+				// Der Umschalter ist zugleich die Messung: bleibt die Groesse ueber die
+				// Tiefe konstant, war der Emitter im jeweils anderen Raum autoriert.
+				Menu += FString::Printf(TEXT("\n%s %-18s %s"), Cur, Names[r],
+					I ? TEXT("konstant (world)") : TEXT("mit Station (local)"));
+				continue;
+			}
+			if (r == 0 || r == 2)
+			{
+				Menu += FString::Printf(TEXT("\n%s %-18s %8.2f"), Cur, Names[r], PartSizeSteps[FMath::Clamp(I, 0, 9)]);
+				continue;
+			}
+			if (r == 4)
+			{
+				const float F4 = PartCountSteps[FMath::Clamp(I, 0, 7)];
+				Menu += FString::Printf(TEXT("\n%s %-18s x%6.2f  (%.1f)"), Cur, Names[r], F4, OrbitalSpriteScale * F4);
+				continue;
+			}
+			// HERO: Faktor auf den Sequencer-Wert. BASE hat keinen Anzahl-Parameter im System.
+			const float F = PartCountSteps[FMath::Clamp(I, 0, 7)];
+			if (r == 1)
+				Menu += FString::Printf(TEXT("\n%s %-18s x%6.2f  (%.0f)"), Cur, Names[r], F, HeroSpawnAmount * F);
+			else
+				Menu += FString::Printf(TEXT("\n%s %-18s x%6.2f  (kein User.baseSpawn im System)"), Cur, Names[r], F);
+		}
+		Menu += FString::Printf(TEXT("\n\nSEQUENCER   heroSpawn %.0f   OXYamount %.0f   Sprite %.1f"),
+			HeroSpawnAmount, OxyAmount, OrbitalSpriteScale);
+		Menu += TEXT("\n[A] groesser   [B] kleiner   [DPad] waehlen   [Y] naechste Seite");
+		PushHudText(Menu);
+		return;
+	}
+
 	if (HUDMode == 2)
 	{
 		FString Menu = FString::Printf(
@@ -3798,8 +4943,32 @@ void AQZoomStagePawn::UpdateReadout()
 				bRet ? TEXT("retired") : bMuted ? TEXT("MUTED") : TEXT("on"), F);
 		}
 		Menu += FString::Printf(TEXT("\n%s [S] SAFE MODE       %-8s"),
-			(MuteSel >= NRows) ? TEXT(">") : TEXT("  "),
+			(MuteSel == NRows) ? TEXT(">") : TEXT("  "),
 			bSafeMode ? TEXT("AN  <<<") : TEXT("aus"));
+		Menu += FString::Printf(TEXT("\n%s [N] NOISE AUS        %-8s"),
+			(MuteSel == NRows + 1) ? TEXT(">") : TEXT("  "),
+			bNoiseOff ? TEXT("AN  <<<") : TEXT("aus"));
+		Menu += FString::Printf(TEXT("\n%s [D] DRILL FADE       %-8s   (wirkt im NOISE AUS)"),
+			(MuteSel == NRows + 2) ? TEXT(">") : TEXT("  "),
+			bDrillFadeOn ? TEXT("AN  <<<") : TEXT("aus"));
+		{
+			Menu += FString::Printf(TEXT("\n%s [R] RESOLUTION       %d%%%s"),
+				(MuteSel == NRows + 3) ? TEXT(">") : TEXT("  "),
+				ResPct,
+				// "<<<" heisst ABWEICHUNG VOM SHOW-DEFAULT (Stufe 2 = 60 %),
+				// nicht mehr "unter 100 %" - das staende sonst dauerhaft da.
+				(ResPct != 60) ? TEXT("  <<<") : TEXT(""));
+			Menu += FString::Printf(TEXT("\n%s [M] MET169          %s"),
+				(MuteSel == NRows + 4) ? TEXT(">") : TEXT("  "),
+				M169VariantIdx ? TEXT("HUELLE  <<<") : TEXT("W1"));
+			static const TCHAR* ShadeNames[5] = { TEXT("RIM"), TEXT("WOLKE"), TEXT("HEATMAP"), TEXT("ISO"), TEXT("PUNKTE") };
+			Menu += FString::Printf(TEXT("\n%s [V] HULL SHADE      %s"),
+				(MuteSel == NRows + 5) ? TEXT(">") : TEXT("  "),
+				ShadeNames[FMath::Clamp(HullShadeIdx, 0, 4)]);
+			Menu += FString::Printf(TEXT("\n%s [C] CELL MAT        %s"),
+				(MuteSel >= NRows + 6) ? TEXT(">") : TEXT("  "),
+				CellMatIdx ? TEXT("TSR-DITHER") : TEXT("TRANSLUCENT  <<<"));
+		}
 		Menu += FString::Printf(
 			TEXT("\n\n[A] mute   [B] alle an   [X] shader: %s   [>] partikel: %s")
 			TEXT("\n[<] anim: %s   [LB] nira: %s   [R3] 8K-SIM: %s")
@@ -4456,6 +5625,12 @@ void AQZoomStagePawn::ApplyPPPreset(int32 P)
 	auto Sat   = [&](float s){ S.bOverride_ColorSaturation = true; S.ColorSaturation = FVector4(s, s, s, 1.f); };
 	auto Con   = [&](float c){ S.bOverride_ColorContrast = true;   S.ColorContrast   = FVector4(c, c, c, 1.f); };
 	auto Exp   = [&](float e){ S.bOverride_AutoExposureBias = true; S.AutoExposureBias = e; };
+	auto BloomSize = [&](float s){ S.bOverride_BloomSizeScale = true; S.BloomSizeScale = s; };
+	// Schwarzanhebung: hebt den Fuss der Kurve an, damit die Vignette nicht
+	// in echtes Schwarz laeuft und auf dem Projektor bandet. Bewusst winzig -
+	// GradeComp kompensiert nur Tint und Belichtung, ein grosser Sockel wuerde
+	// die HUD-Schrift verschieben, ohne dass die Kompensation es mitbekommt.
+	auto Lift  = [&](float o){ S.bOverride_ColorOffset = true; S.ColorOffset = FVector4(o, o, o, 0.f); };
 	auto DOF   = [&](float f){ S.bOverride_DepthOfFieldFocalDistance = true; S.DepthOfFieldFocalDistance = Focal;
 	                            S.bOverride_DepthOfFieldFstop = true; S.DepthOfFieldFstop = f; };
 	// PresetTintStrength lerps the authored tint toward WHITE — 1 = as authored, 0 = the grade
@@ -4470,7 +5645,19 @@ void AQZoomStagePawn::ApplyPPPreset(int32 P)
 	};
 	switch (P)
 	{
-	case 1: Bloom(1.6f); DOF(2.0f); Temp(7600.f); Sat(0.88f); Con(1.10f); Vig(0.50f); Exp( 0.3f); break;                    // P1 Cinematic — warm, glow, shallow DOF
+	// P1 CINEMATIC - ueberarbeitet 04.09. abends nach dem Ars-Test.
+	// Farben unveraendert (Temp 7600, Sat 0.88, Con 1.10, kein Tint) - gewuenscht
+	// war ein ruhigeres Leuchten und eine Spur mehr Kino, keine Umfaerbung.
+	//   Bloom 1.60 -> 1.40 bei Breite 4 -> 7: gleiche Lichtmenge, weiter verteilt.
+	//   DOF   f/2.0 -> f/2.8: Tiefe ja, aber die Unschaerfe soll auf der Wand
+	//         nicht wie ein Defekt aussehen.
+	//   Exp   0.30 -> 0.38: holt zurueck, was die staerkere Vignette der Mitte nimmt.
+	//   Lift  0.006: filmischer Fuss statt hartem Schwarz am Vignettenrand.
+	// Die Vignette steht in P1VignetteIntensity, weil ihre Obergrenze aus der
+	// L-Geometrie folgt und nicht aus Geschmack - siehe Header.
+	case 1: Bloom(1.40f); BloomSize(P1BloomSizeScale); DOF(2.8f); Temp(7600.f);
+	        Sat(0.88f); Con(1.10f); Vig(P1VignetteIntensity); Exp(0.38f);
+	        Lift(0.006f); break;
 	case 2: Bloom(1.5f); Tint(1.0f, 0.22f, 0.18f); Temp(3200.f); Sat(1.30f); Con(1.28f); Vig(0.55f); Exp(0.1f); break;      // P2 Red Alert — crimson wash, warm, heavy vignette
 	case 3: Bloom(2.6f); DOF(1.4f); Temp(4400.f); Sat(0.70f); Con(1.20f); Vig(0.85f); Exp(-0.7f); break; // P3 Deep Space — dark, heavy bloom+DOF
 	case 4: Bloom(1.2f); DOF(1.8f); Temp(6200.f); Sat(1.55f); Con(1.15f); Vig(0.30f); Exp( 0.2f); break; // P4 Vivid — saturated showcase, mild DOF

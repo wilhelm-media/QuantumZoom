@@ -127,6 +127,15 @@ struct FQZHandover
 	 *  at LightHoldLevel. A scene's light and a scene's geometry do not have to leave together:
 	 *  the NirA rig keeps lighting what comes after it, even once NirA itself has handed over.
 	 *  0 = off. ═══ */
+	/** Eigener Exponent, mit dem die Lichter DIESER Station ihre Intensitaet an die
+	 *  Stationsskala koppeln. -1 = den globalen LightScalePower nehmen.
+	 *  2 haelt die Beleuchtungsstaerke ueber alle Groessen konstant (Intensitaet
+	 *  durch Abstand im Quadrat); 0 laesst die Intensitaet stehen, wodurch die Szene
+	 *  beim Abstieg immer dunkler wird. Pro Station, weil die Ebenen dieses Projekts
+	 *  mit unterschiedlichen Annahmen eingerichtet wurden. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="-1.0", ClampMax="4.0"))
+	float LightScalePower = -1.f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float LightHoldFrom = 0.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Stage", meta=(ClampMin="0.0", ClampMax="1.0"))
@@ -336,6 +345,7 @@ class USceneComponent;
 class UTextRenderComponent;
 class UInstancedStaticMeshComponent;
 class UStaticMeshComponent;
+class UMeshComponent;
 class UStaticMesh;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
@@ -640,6 +650,22 @@ public:
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks") bool bQuarkMotion = true;
 	/** Ladder row the triad belongs to; the motion only runs while that station is on screen. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks") int32 QuarkStation = 7;
+	/** Die Quarks haengen an derselben Station wie der Focus-Proton, sollen aber erst
+	 *  auftauchen, wenn die Nukleonen gehen. Actors mit dem Tag QZQuarkReveal bekommen
+	 *  deshalb ihre eigene Rampe ueber dieses Fenster - davor sind sie versteckt. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float QuarkRevealStart = 0.95f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float QuarkRevealEnd = 0.9575f;
+	/** Fenster, in dem der Focus-Proton verschwindet. Er ist die Referenz "noch ein
+	 *  Proton", nicht der Gegenstand - und seine Huelle erreicht die Linse bei rund
+	 *  95.2 Prozent (Anker 1500 uu, Radius 1400 mal Skala). Actors mit dem Tag
+	 *  QZCoreFade gehen ueber dieses Fenster, bevor das passiert. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float CoreFadeStart = 0.94f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float CoreFadeEnd = 0.95f;
+	void TickQuarkReveal();
 	/** How far a quark strays, as a fraction of its own rest radius. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="1.0")) float QuarkWander = 0.42f;
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.0", ClampMax="4.0")) float QuarkSpeed = 0.5f;
@@ -677,6 +703,11 @@ public:
 	 *  72, 90, 144, 180, 240, 360. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="10.0"))
 	float QuarkColorPeriodDeg = 120.f;
+	/** Sekunden pro Farbschritt des Rads. Ersetzt seit 04.09. den Swirl-getriebenen
+	 *  Takt: FillerSwirl steht bei Stillstand, und mit ihm stand die Farbe. Weltzeit
+	 *  laeuft unter nDisplay cluster-synchron. PeriodDeg bleibt nur als Altlast. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Quarks", meta=(ClampMin="0.2"))
+	float QuarkColorCycleSec = 2.f;
 	float QuarkClock = 0.f;
 	/** Authored rest positions, captured the first frame each quark is seen. */
 	TArray<FVector> QuarkHome;
@@ -875,7 +906,11 @@ public:
 	 *  switches together — r.Nanite is per-node, and a Nanite wall next to a fallback floor
 	 *  measures nothing. Distinct from NaniteDiagStep above: that one asks WHICH Nanite path the
 	 *  cluster takes, this one asks whether Nanite is involved at all. */
-	bool  bNaniteOff = false;
+	// NANITE LAEUFT AUF DEM CLUSTER NICHT. Default deshalb AUS, damit der
+	// lokale Test dieselben Fallback-Meshes rendert wie der Deep Space -
+	// sonst misst man hier eine andere Show als dort. Projektweit steht
+	// zusaetzlich r.Nanite.ProjectEnabled=False in DefaultEngine.ini.
+	bool  bNaniteOff = true;
 
 	// ── DMI CACHE ────────────────────────────────────────────────────────────────────────────────────────
 	// THE STARTUP STALL: SetStationFade ran CreateDynamicMaterialInstance() on first touch of every material
@@ -951,6 +986,227 @@ public:
 	TMap<TWeakObjectPtr<ULightComponent>, bool>  SafeSavedShadows;
 	TMap<TWeakObjectPtr<ULightComponent>, float> SafeSavedVolScatter;
 	TArray<TWeakObjectPtr<AActor>> SafeHiddenFog;
+
+	void ApplyCheapMats();
+	// NOISE AUS: tauscht zur Laufzeit jeden Slot, dessen Material eine MI_CHEAP_-
+	// Schwester hat (56 additive Instanzen, /Game/QuantumZoom/VFX/cheap/), gegen den
+	// noise-freien Unlit-Master. Ein Parameter auf 0 spart NICHTS - der prozedurale
+	// Noise-Node rechnet trotzdem; nur ein Shader ohne den Node spart wirklich.
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bNoiseOff = false;
+	// DRILL FADE: MPC_QZCheap.DrillOn - der skaleninvariante Kamera-Distanz-Fade im
+	// Cheap-Master (dist/ObjectRadius, ~10 Instruktionen). Wirkt nur bei NOISE AUS.
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	bool bDrillFadeOn = false;
+	UPROPERTY(Transient) TMap<FName, TObjectPtr<UMaterialInterface>> CheapCache;
+	TSet<FName> CheapMiss;
+	TMap<TWeakObjectPtr<UMeshComponent>, TArray<TWeakObjectPtr<UMaterialInterface>>> CheapSaved;
+	UPROPERTY(Transient) TObjectPtr<UMaterialParameterCollection> CheapMPC;
+
+	// PULSE-RAMPE. PulseAmp der Kernstation (SM_S6_*) faehrt mit dem Zoom von 0 auf den
+	// autorierten Wert. Fest stand er beim Einblenden voll da, waehrend die Station noch
+	// mikroskopisch war - das Aufblasen war dann ein Vielfaches der Geometrie.
+	/** Zoom, ab dem der Puls seinen vollen autorierten Wert hat - dort fuellen die
+	 *  Nukleonen die Wand. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Nucleus", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float PulseRampEnd = 0.95f;
+	/** Steilheit der Rampe. Auf K der Kernstation gesetzt (Handover[6].Timing x
+	 *  ZoomIntensity, derzeit 133) ist der Puls ein konstanter Anteil der aktuellen
+	 *  Nukleonengroesse. Kleiner = der Puls kommt frueher. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Nucleus", meta=(ClampMin="1.0", ClampMax="400.0"))
+	float PulseRampK = 133.f;
+	void TickPionPulse();
+	/** DMI -> autorierter PulseAmp. Einmal aufgebaut; danach nur noch geschrieben. */
+	TMap<TWeakObjectPtr<UMaterialInstanceDynamic>, float> PulseAmpBase;
+	int32 PulseScanTries = 0;
+
+	void ApplyResPct();
+	// RESOLUTION-Bisect: r.ScreenPercentage-Stufen 100/75/60/50/25. Bei 8K-Stereo ist
+	// die Pixelzahl der groesste Einzelfaktor - 50 % Screen Percentage = ein Viertel
+	// der Shading-Arbeit, TSR skaliert zurueck. Index statt Bool: [A] zykliert.
+	// SHOW-DEFAULT ist Stufe 2 (60 %): der Ars-Test am 04.09. lief damit sauber.
+	// BeginPlay ruft ApplyResPct, sonst bliebe die CVar auf dem Engine-Default.
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	int32 ResPctIdx = 2;
+	/** Wirksame Aufloesung in Prozent (r.ScreenPercentage). Seit 08.09. der EINE Wert, den
+	 *  ApplyResPct schreibt - die PERF-Zeile setzt ihn ueber ihre Stufen, das MELINDA-Menue
+	 *  direkt. Beim Start aus GameUserSettings.ini [QuantumZoom] ResPct, sonst 60. */
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect", meta=(ClampMin="10", ClampMax="100"))
+	int32 ResPct = 60;
+
+	// MELINDA-SEITE (HUDMode 5, im Y-Zyklus an ERSTER Stelle nach clean). Aufloesung
+	// 10..100 % waehlen, mit A bestaetigen, RESTART laedt die Map neu - Titel, Sequencer,
+	// alles wie beim Launch, mit der bestaetigten Aufloesung.
+	int32 MelSel = 5;                 // Cursor: 0..9 = 10..100 %, 10 = RESTART
+	int32 MelResPct = 60;             // bestaetigte Wahl, wirksam beim RESTART
+	int32 RestartSeq = 0;             // Cluster-Zaehler: jeder Sprung = ein Neuladen auf jedem Node
+	int32 RestartSeen = 0;
+	void RestartShow();
+	void ReloadMap();
+
+
+	void TickM169Variant();
+	// MET169-FASSUNG: 0 = W1 (109 Koerper, Ball+Stab+51 Orbitallappen),
+	// 1 = HUELLE (DOCKBODY + eine Haut ueber alles uebrige). Die Huelle
+	// existiert, weil ein halbtransparentes Material bei W1 durch alles
+	// durchsieht: gemessen 16,08 getroffene Flaechen pro Sehstrahl gegen
+	// 3,10 bei der Huelle. Durchgesetzt wird pro Frame hinter ApplyStations.
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	// SHOW-DEFAULT IST JETZT DIE HUELLE. Michael nach dem Test: die
+	// RIM-Fassung des MET169 wird die Vorgabe. Die Huelle traegt
+	// MI_QZ_ProbVolume, und HullShadeIdx 0 ist dort das RIM-Register.
+	// Die Orbital-Filler (18 NiagaraActor) sind aus QZM169W1 entfernt
+	// worden und leben in beiden Fassungen weiter.
+	int32 M169VariantIdx = 1;
+	TArray<TWeakObjectPtr<AActor>> M169W1Cache;
+	TArray<TWeakObjectPtr<AActor>> M169HullCache;
+	bool bM169CacheTried = false;
+	// Der Taktgeber fuer die Sichtbarkeit: M169_MET169_DOCKBODY steht in
+	// BEIDEN Fassungen und wird vom Schalter nie angefasst, sein
+	// Hidden-Zustand ist also die unverfaelschte Absicht der
+	// Stations-Logik fuer MET169.
+	TWeakObjectPtr<AActor> M169GateActor;
+
+	void ApplyHullShading();
+
+	/** ZELL-MATERIAL: 0 = translucent, 1 = TSR-Dither (Show-Default).
+	 *
+	 *  Die translucente Fassung blendet stufenlos aus, weil Opacity keinen
+	 *  Schwellwert kennt. Die Dither-Fassung bleibt als Rueckfallebene
+	 *  erreichbar - sie ist billiger und traegt den Drill-Kegel. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect")
+	int32 CellMatIdx = 1;
+	void ApplyCellMaterial();
+
+	/** TIEFEN-SCHALTER PRO ACTOR: der Tag QZOffAt<prozent>.
+	 *
+	 *  QZOffAt73 heisst: ab ZoomProgress 0.73 ist dieser Actor weg,
+	 *  samt seinem Teilbaum. Gedacht fuer teure Geometrie, die frueher
+	 *  gehen soll als ihre Station - etwa die NirA-Huelle, waehrend das
+	 *  MET169-Molekuel an derselben Station weiterlebt.
+	 *
+	 *  Warum nicht QZMaxVis: ApplyStations liest den Tag zwar, laesst ihn
+	 *  aber vom Handover-Struct ueberstimmen, sobald die Zeile enabled
+	 *  ist - und er wirkt ohnehin nur auf Stations-Actors, nicht auf
+	 *  einzelne Kinder.
+	 *
+	 *  NUR VERSTECKEND. Diese Passe blendet nie etwas ein, kann also mit
+	 *  keinem anderen Schreiber um die Sichtbarkeit streiten. */
+	void TickDepthCutoff();
+	/** Zaehlt die getroffenen Slots. Solange 0, wird weiter nachgebunden -
+	 *  die Zellen liegen in einem gestreamten Sublevel. */
+	int32 CellMatComps = 0;
+
+	/** FESTE BOUNDS FUER GPU-NIAGARA, in WELT-Einheiten.
+	 *
+	 *  Ein GPU-Emitter rechnet seine Ausdehnung nicht mit - er nimmt die
+	 *  festen Bounds des Systems, und deren Niagara-Default ist +/-100 im
+	 *  LOKALEN Raum. Bei den Orbital-Fillern (Komponenten-Skalierung 0.01
+	 *  und 0.001) sind das +/-1 bzw. +/-0.1 uu in der Welt. Solche Boxen
+	 *  fallen dem Frustum-Culling zum Opfer, der kleineren zuerst - das war
+	 *  'Wand ODER Boden' und spaeter 'Hull Base ist weg'.
+	 *
+	 *  Warum hier und nicht im Level: SetSystemFixedBounds ist ein
+	 *  Laufzeit-Aufruf und wird NICHT serialisiert. Im Editor gesetzt war er
+	 *  nach dem naechsten Laden wieder auf Null - nachgemessen. Im Pawn
+	 *  gesetzt gilt er auf jedem Node und ueberlebt jedes Speichern.
+	 *
+	 *  Wirkt nur auf Actors mit dem Tag QZNiagaraBounds - blind auf alle
+	 *  Systeme angewandt wuerde es Systeme umkrempeln, die ihre Bounds
+	 *  bewusst selbst fuehren. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="1.0"))
+	float NiagaraBoundsWorldRadius = 150.f;
+	/** Drossel fuer die [QZoomFill]-Diagnose: ein Eintrag pro Sekunde und Komponente. */
+	TMap<TWeakObjectPtr<class UNiagaraComponent>, double> NiagaraDiagLast;
+	// HULL SHADE: Register des Wahrscheinlichkeitsvolumens auf
+	// MI_QZ_ProbVolume. 0 RIM, 1 WOLKE, 2 HEATMAP, 3 ISO, 4 PUNKTE.
+	// Eine geteilte MID, ein Skalar - kein Material-Tausch, also kein
+	// Compile-Ruckler beim Durchzykeln am Wall.
+	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect")
+	int32 HullShadeIdx = 0;
+	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> HullMID;
+	/** Carrier und Collector tragen dieselbe Huellengeometrie, sollen aber
+	 *  NICHT mit der MET169-Helligkeit mitfaden. Darum je eine eigene MID
+	 *  aus einer eigenen Instanz; die Helligkeit kommt aus car_bright bzw.
+	 *  col_bright derselben Collection. Mode und Opacity bleiben geteilt. */
+	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> HullMIDCar;
+	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> HullMIDCol;
+	int32 HullMIDComps = 0;
+
+	/** Die Huelle folgt der HELLIGKEIT DES SCHWEFELS, multipliziert mit
+	 *  diesem Faktor.
+	 *
+	 *  Abgelesen, nicht nachgerechnet: der Pawn schreibt gar kein
+	 *  Brightness - die Schwefelkurve kommt aus dem Sequencer. Eine
+	 *  nachgebaute Formel muesste jede Kurvenaenderung mitpflegen und
+	 *  liefe auseinander. Der Ist-Wert wird deshalb jeden Frame vom
+	 *  DOCKBODY genommen (das ist der goldene Koerper) und auf die
+	 *  Huellen-MID geschrieben.
+	 *
+	 *  0.66 haelt das heutige Verhaeltnis (Schwefel 1.75, Huelle 1.15).
+	 *  0 = Huelle folgt nicht, behaelt ihren eigenen Wert. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0.0", ClampMax="3.0"))
+	float HullBrightnessFollow = 0.66f;
+
+	// MEMBRAN-SEITE (HUDMode 3). Regler der sauberen Membran, in Stufen.
+	// Stufen statt stufenlos: am Wall vergleicht man, und ein Index laesst
+	// sich ueber den Cluster synchron halten, ohne einen Float pro Frame.
+	void ApplyMembraneParams();
+	int32 MembSel = 0;
+
+	// PARTIKEL-SEITE (HUDMode 4). Groesse und Anzahl der MET169-Filler (HERO =
+	// Schwefel, BASE), in Stufen. Michael 07.09.: "sprite size zu klein - Groesse und
+	// Anzahl als Parameter in einem neuen Partikel-Menue, im Y-Zyklus". Anders als
+	// MembIdx laufen die Stufen ueber den Cluster: Wall und Floor muessen dieselben
+	// Sprites zeigen, sonst ist der Vergleich am Wall wertlos.
+	void ApplyParticleMenu(bool bReinitCounts = false);
+	int32 PartSel = 0;
+	/** Stufenindex je Zeile: 0 HERO GROESSE, 1 HERO ANZAHL, 2 BASE GROESSE, 3 BASE ANZAHL. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Niagara") TArray<int32> PartIdx;
+	/** Die Orbital-Systeme aus dem Menue, einmal gesammelt. Bei Modus "konstant"
+	 *  schreibt TickOrbitalScale jeden Frame - die Komponenten-Skalierung aendert
+	 *  sich ja laufend. */
+	// ── SEQUENCER-WERTE ────────────────────────────────────────────────────────
+	// Interp heisst: taucht in jeder Sequenz als Float-Spur auf, sobald der Pawn
+	// dort als Track liegt. Der Pawn schreibt sie jeden Frame in die Systeme -
+	// waehrend die Sequenz laeuft, und auf jedem Node. Startwerte = der Stand im
+	// Level, damit sich ohne Spur nichts aendert.
+	/** User.heroSpawn am MET169-Hero-Filler. Mit Stufen-Keys springt die Dichte. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Interp, Category="QZoomStage|Niagara", meta=(ClampMin="0.0"))
+	float HeroSpawnAmount = 3000.f;
+	/** User.OXYamount an N_Particle_Orbitals (M169_OXY). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Interp, Category="QZoomStage|Niagara", meta=(ClampMin="0.0"))
+	float OxyAmount = 1500.f;
+	/** User.ParticleScale_Orbitals - die Sprite-Groesse der Orbitale, ebenfalls keybar. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Interp, Category="QZoomStage|Niagara", meta=(ClampMin="0.0"))
+	float OrbitalSpriteScale = 50.f;
+	/** Startet das System bei jeder Aenderung der Anzahl neu. Noetig, wenn die Zahl
+	 *  einen BURST speist statt einer Rate - kostet die vorhandenen Partikel. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Niagara")
+	bool bSpawnChangeRestarts = false;
+	void TickSpawnAmounts();
+	TArray<TWeakObjectPtr<class UNiagaraComponent>> HeroComps;
+	TMap<TWeakObjectPtr<class UNiagaraComponent>, float> SpawnApplied;
+	int32 SpawnScanTries = 0;
+	TArray<TWeakObjectPtr<class UNiagaraComponent>> OrbitalComps;
+	void TickOrbitalScale();
+	static const float PartSizeSteps[10];
+	static const float PartCountSteps[8];
+	TArray<int32> MembIdx;
+	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> MembMID;
+	int32 MembMIDComps = 0;
+
+	/** HUELLE BEIM HINEINZOOMEN AUSBLENDEN, Schwefel bleibt stehen.
+	 *
+	 *  Getrieben wird Opacity auf der geteilten HullMID. Der Schwefel
+	 *  haengt an MI2_M169_Orb_MET_S_dock und ist davon unberuehrt - genau
+	 *  daraus entsteht der Eindruck, IN den Schwefel zu zoomen.
+	 *  Bewusst nicht ueber die Stations-Blende: die faellt an beiden Enden
+	 *  ab und naehme den Schwefel mit. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float HullFadeFrom = 0.80f;
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float HullFadeTo   = 0.90f;
 	float PaceAt(float P) const;                  // ZoomPace sampled at a depth; 1 when uncurved
 
 	/** Look-around orbit speed (deg/sec at full stick) + pitch clamp. */
@@ -1159,6 +1415,23 @@ public:
 	 *  Live — no rebuild, no restart. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float PresetTintStrength = 1.f;
+
+	/** P1 Cinematic: Vignettenstaerke. Live drehbar, weil die Obergrenze
+	 *  von der L-Geometrie kommt und nicht vom Geschmack: Wand und Boden
+	 *  sind getrennte Viewports, die UE-Vignette ist um JEDE Mitte radial,
+	 *  und an der Naht (Wandunterkante/Bodenoberkante) addieren sich beide
+	 *  zu einem dunklen Balken quer durch den Raum. Gerechnet mit der
+	 *  Shader-Formel: 0.50 laesst die Naht bei 0.797, 0.65 bei 0.691,
+	 *  1.00 bei 0.456 - ab da ist der Balken das, was man zuerst sieht.
+	 *  Wirkt beim naechsten ApplyPPPreset (Preset durchzykeln). */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="0.0", ClampMax="1.5"))
+	float P1VignetteIntensity = 0.65f;
+
+	/** P1 Cinematic: Bloom-Breite (UE-Default 4). Groesser = dasselbe Licht
+	 *  weiter verteilt, also weiches Glimmen statt flirrender Kantensaum -
+	 *  auf der 8K-Wand der Unterschied zwischen Glut und Artefakt. */
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Look", meta=(ClampMin="1.0", ClampMax="16.0"))
+	float P1BloomSizeScale = 7.0f;
 
 	/** While the PERF MENU is open, suspend the two grade terms a per-channel compensation cannot
 	 *  beat: the VIGNETTE (it darkens by position, hardest in the corners the menu lives in — no
@@ -1550,6 +1823,9 @@ public:
 	 *      between = a deliberate darkening or brightening with depth, if you want one. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Lights", meta=(ClampMin="0.0", ClampMax="3.0"))
 	float LightScalePower = 2.f;
+	/** Drossel fuer die [QZoomLight]-Messzeile: ein Block pro Sekunde. */
+	double LightDiagLast = 0.0;
+	uint64 LightDiagFrame = 0;
 	/** Ceiling on that multiplier, so a station at 1500x cannot ask for an intensity that blows
 	 *  the whole frame out through bloom before its own fade has taken it away. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage|Lights", meta=(ClampMin="1.0"))
@@ -1580,27 +1856,17 @@ private:
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="0.5", ClampMax="12.0"))
 	float StationDissolveGain = 1.6f;
 
-	/** NIRA-NETZ: NetAmount ueber die Tiefe fahren, statt es fest zu authoren.
+	/** NIRA-NETZ: der Pawn faehrt NetAmount NICHT mehr.
 	 *
-	 *  Wirkt nur auf Actors mit dem Tag "QZNetSolid" — M_NiraMaster traegt NetAmount auch auf
-	 *  den Nukleonen (0.69/0.67), und die duerfen ihre authorierten Werte behalten. Ohne den
-	 *  Tag wuerde dieselbe Zeile sie mit ueberschreiben.
+	 *  Hier lag eine Rampe, die NetAmount ueber die Tiefe von solide nach
+	 *  offen schob. Michael animiert das jetzt von Hand. Der Wert steht damit
+	 *  auf dem, was die Material-Instanz authoriert - MI_NIRA_Net_Volume
+	 *  traegt 1.717 - und niemand schreibt mehr dagegen.
 	 *
-	 *  Zwischen From und To wird NetAmount von Open nach Solid interpoliert (smoothstep),
-	 *  davor bleibt Open stehen, danach Solid. Beide Endwerte sind Parameter, weil die
-	 *  RICHTUNG vom Graphen abhaengt: bei MI_NIRA_Net_Volume steht NetAmount auf 1.0 gegen
-	 *  einen Master-Default von 0, also ist 1 das volle Netz und kleiner = geschlossener.
-	 *  Sollte es umgekehrt sein, tauscht man hier zwei Zahlen statt neu zu bauen. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") bool  bNetSolidRamp   = true;
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net", meta=(ClampMin="0.0", ClampMax="1.0"))
-	float NetSolidFrom   = 0.50f;
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net", meta=(ClampMin="0.0", ClampMax="1.0"))
-	float NetSolidTo     = 0.65f;
-	/** NetAmount am Anfang des Fensters (und davor). */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountOpen  = 0.65f;
-	/** NetAmount am Ende des Fensters (und danach). GROESSER = solider — die Richtung war
-	 *  andersherum als der Name vermuten laesst, gemessen an Michaels Vorgabe 0.65 -> 1.2. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Net") float NetAmountSolid = 1.20f;
+	 *  Mit der Rampe sind bNetSolidRamp, NetFadeFrom, NetFadeTo,
+	 *  NetAmountSolid und NetAmountFade entfallen: tote Regler im
+	 *  Detail-Panel sind schlimmer als gar keine. */
+
 
 	/** ORBITAL-FILLER: Groesse vollstaendig von Station und Kamera entkoppeln.
 	 *
@@ -1661,11 +1927,19 @@ private:
 	 *  centre — two bright spots instead of one opening, and the L stops reading as one space.
 	 *  Fully open within this half-angle of the axis. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="1.0", ClampMax="89.0"))
-	float TunnelInnerDeg = 40.f;
+	// 61 statt 40: zusammen mit Outer 67 ein nur 6 Grad breiter Rand. Das alte
+	// Band 40..85 war 45 Grad breit - darin lag der Maskenwert ueberall nahe der
+	// Clip-Schwelle 0.30, und das Rauschen entschied ueber an/aus. Das war der
+	// Griesel am Bohrloch, nicht die Noise-Frequenz.
+	float TunnelInnerDeg = 61.f;
 
 	/** Beyond this half-angle the surface stays solid no matter how close it is. */
 	UPROPERTY(EditAnywhere, Category="QZoomStage", meta=(ClampMin="2.0", ClampMax="180.0"))
-	float TunnelOuterDeg = 85.f;
+	// 67 statt 85. Die Lochgroesse bleibt: der alte Rand lag effektiv bei cone=0.5,
+	// also cos 0.43 = 64 Grad - der neue Uebergang 61..67 liegt genau darum. Es wird
+	// kein anderes Loch, nur ein schaerferes, dessen Rand die grobe Noise noch
+	// leicht verzieht statt ihn aufzuloesen.
+	float TunnelOuterDeg = 67.f;
 
 	/** Tunnel follows where you are LOOKING rather than being pinned to the anchor. On, the axis is
 	 *  the current view forward, so free-look carries the opening with it; off, it always drills
@@ -1759,7 +2033,7 @@ private:
 	 *  guarded off so a bisect can't accidentally rebuild the fillers); LB/RB/X/triggers/sticks
 	 *  keep working, so you can zoom to the bad spot WITH the menu open. Keys 1-9 work in every
 	 *  mode. Startup state is this property — 0 per the show default, set 1 to boot with HUD. */
-	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0", ClampMax="2"))
+	UPROPERTY(EditAnywhere, Category="QZoomStage|Perf Bisect", meta=(ClampMin="0", ClampMax="5"))
 	int32 HUDMode = 0;
 	int32 MuteSel = 0;           // menu cursor, cluster-synced so the wall shows the same row
 
@@ -1845,6 +2119,11 @@ private:
 	void    UpdateCH4Cycle(float Dt);                // looping redox cycle at the NirA station
 	float   CH4Phase = 0.f;                          // 0..1, wraps forever
 	FVector TunnelAxis = FVector::ForwardVector;     // camera -> anchor, world space, shared by every viewport
+	// URSPRUNG des Kegels (Kameraposition). Zusammen mit TunnelAxis
+	// beschreibt er den Kegel als Bereich IM RAUM - ohne ihn kann ein
+	// Material nur gegen die Blickrichtung testen, und die ist auf Wand
+	// und Boden verschieden. Genau daran fehlte dem Boden das Loch.
+	FVector TunnelOrigin = FVector::ZeroVector;
 	int32   AudioLive = 0;                          // tracks actually spawned, for the readout
 	float   AudioPeak = 0.f;                        // loudest track's current multiplier
 	float   GateScale = 1.f;                         // station scale in flight, for the camera-dissolve bubble
