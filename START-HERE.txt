@@ -1,0 +1,78 @@
+QUANTUMZOOM - DESKTOP BUILD (wall only)
+=======================================
+
+What this is
+------------
+The same piece as in Deep Space, without the cluster: one picture instead of
+wall and floor. There is no separate mode and no second build for it. With no
+nDisplay configuration present, the camera pawn reports "no cluster", takes
+over the camera itself, and the title card falls back to its wall version.
+
+This folder is complete. It needs neither Unreal nor the project folder.
+Copy the folder anywhere, start it, done.
+
+
+Starting
+--------
+Double-click   QuantumZoom.exe
+
+The piece starts on the title card, at 100 per cent render resolution.
+
+Fullscreen:   QuantumZoom.exe -fullscreen
+Window size:  QuantumZoom.exe -windowed -resx=2560 -resy=1440
+
+Quit: Alt+F4.
+
+
+All key bindings
+----------------
+Next to this file as   QuantumZoom-Controller-EN.pdf   - one page to print,
+the essentials at the top. German: QuantumZoom-Controller.pdf
+Only the bare minimum here.
+
+
+Controls
+--------
+Y          steps through the operator pages:
+           clean -> MELINDA -> HUD -> PERF -> MEMBRANE -> PARTICLES
+D-Pad      selects a row
+A          confirms / next value
+B          back / smaller value
+Triggers   zoom in and out
+R-Stick    look around
+
+MELINDA is the first page and the one that matters before a rehearsal:
+   QUANTUM ZOOM RESOLUTION   10 to 100 per cent, default 100
+   RESTART                   reloads and starts on the title card again
+
+The chosen resolution is stored and applies on the next start as well. It
+governs the internal render resolution; the window size is set on the command
+line.
+
+
+If it stutters
+--------------
+1. Open MELINDA, set the resolution to 40 or 30 per cent, confirm with A,
+   then RESTART. This is the largest lever by far: pixels cost quadratically.
+2. If that is not enough, mute individual stages on the PERF page and watch
+   which one brings the frame rate back. That page exists for exactly this.
+
+
+The first start takes a while
+-----------------------------
+On the very first run the application builds its shader cache. That can take
+one to two minutes and looks like a hang. It starts briskly afterwards.
+Do not cancel it.
+
+
+The log stays quiet
+-------------------
+The diagnostic lines from debugging are tied to the PERF page. As long as it
+is not open, the application writes nothing. To measure, press Y through to
+PERF - then they run again.
+
+
+Version
+-------
+Cooked package of 19 September 2026, development build.
+Start resolution 100 per cent, diagnostics tied to the PERF page.

@@ -6,22 +6,29 @@ Was das ist
 Dasselbe Stueck wie im Deep Space, nur ohne Cluster: ein Bild statt Wand und
 Boden. Es gibt dafuer keinen eigenen Modus und keinen zweiten Build. Ohne eine
 nDisplay-Konfiguration meldet der Kamera-Pawn "kein Cluster", uebernimmt die
-Kamera selbst, und die Titelkarte zeigt ihre Wall-Fassung. Mehr passiert nicht.
+Kamera selbst, und die Titelkarte zeigt ihre Wall-Fassung.
+
+Dieser Ordner ist vollstaendig. Es braucht weder Unreal noch den Projektordner.
+Ordner irgendwohin kopieren, starten, fertig.
 
 
 Starten
 -------
-Doppelklick auf   QZ-Desktop-Wall.bat
+Doppelklick auf   QuantumZoom.exe
 
-Das Stueck startet im Titel. Der Unreal-Editor muss NICHT laufen.
+Das Stueck startet im Titel, mit 100 Prozent Renderaufloesung.
 
-Vollbild statt Fenster:
-   In der .bat die Zeile
-       -windowed -resx=2560 -resy=1440 ^
-   ersetzen durch
-       -fullscreen ^
+Vollbild:      QuantumZoom.exe -fullscreen
+Fenstergroesse: QuantumZoom.exe -windowed -resx=2560 -resy=1440
 
 Beenden: Alt+F4.
+
+
+Alle Tastenbelegungen
+---------------------
+Liegen als   QuantumZoom-Controller.pdf   daneben - eine Seite zum Ausdrucken,
+Wichtigstes oben. Englisch: QuantumZoom-Controller-EN.pdf
+Hier nur das Noetigste.
 
 
 Bedienung
@@ -35,11 +42,12 @@ Trigger    Zoom vor und zurueck
 R-Stick    umsehen
 
 MELINDA ist die erste Seite und die wichtigste vor einer Probe:
-   QUANTUM ZOOM RESOLUTION   10 bis 100 Prozent, Standard 60
+   QUANTUM ZOOM RESOLUTION   10 bis 100 Prozent, Standard 100
    RESTART                   laedt neu und startet wieder im Titel
 
 Die gewaehlte Aufloesung wird gespeichert und gilt auch beim naechsten Start.
-Sie regelt die interne Renderaufloesung; die Fenstergroesse steht in der .bat.
+Sie regelt die interne Renderaufloesung; die Fenstergroesse steht in der
+Kommandozeile.
 
 
 Wenn es ruckelt
@@ -50,14 +58,21 @@ Wenn es ruckelt
    zusehen, welche die Bildrate zurueckbringt. Die Seite ist genau dafuer da.
 
 
-Wo das laeuft
--------------
-Diese Fassung liest den Projektordner und die Engine-Installation von der
-Workstation. Sie laeuft dort, wo beides liegt. Fuer einen fremden Rechner
-braucht es das gekochte Paket - das ist ein eigener Ordner mit rund 3 GB, in
-dem alles enthalten ist, was die Anwendung braucht.
+Der erste Start dauert
+----------------------
+Beim allerersten Start legt die Anwendung ihren Shader-Zwischenspeicher an.
+Das kann ein bis zwei Minuten dauern und sieht aus wie ein Haenger. Danach
+startet sie zuegig. Nicht abbrechen.
+
+
+Das Protokoll ist still
+-----------------------
+Die Messzeilen der Fehlersuche haengen an der PERF-Seite. Solange die nicht
+offen ist, schreibt die Anwendung nichts mit. Wer messen will, blaettert mit Y
+auf PERF - dann laufen sie wieder.
 
 
 Stand
 -----
-Build vom 8. September 2026, Commit bd138ac auf QuantumZoom_dev.
+Gekochtes Paket vom 19. September 2026, Development-Build.
+Startaufloesung 100 Prozent, Messzeilen an die PERF-Seite gekoppelt.
