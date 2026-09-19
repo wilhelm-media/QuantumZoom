@@ -1030,15 +1030,23 @@ public:
 	int32 ResPctIdx = 2;
 	/** Wirksame Aufloesung in Prozent (r.ScreenPercentage). Seit 08.09. der EINE Wert, den
 	 *  ApplyResPct schreibt - die PERF-Zeile setzt ihn ueber ihre Stufen, das MELINDA-Menue
-	 *  direkt. Beim Start aus GameUserSettings.ini [QuantumZoom] ResPct, sonst 60. */
+	 *  direkt.
+ *
+ *  STARTWERT 100 seit 19.09.2026 (Michael, fuer die Desktop-Fassung). Der Weg ueber
+ *  GameUserSettings.ini traegt nicht: die gepackte Fassung raeumt Saved/Config/Windows
+ *  beim Start ab - nachgemessen, die vorgelegte Datei war nach dem ersten Frame weg.
+ *  Deshalb steht der Startwert hier und nirgendwo sonst.
+ *
+ *  FUER DEN CLUSTER heisst das: auch dort beginnt ein neu gepackter Build bei 100 %.
+ *  Der Saal faehrt seinen Wert wie bisher ueber die MELINDA-Seite ein. */
 	UPROPERTY(EditAnywhere, Transient, Category="QZoomStage|Perf Bisect", meta=(ClampMin="10", ClampMax="100"))
-	int32 ResPct = 60;
+	int32 ResPct = 100;
 
 	// MELINDA-SEITE (HUDMode 5, im Y-Zyklus an ERSTER Stelle nach clean). Aufloesung
 	// 10..100 % waehlen, mit A bestaetigen, RESTART laedt die Map neu - Titel, Sequencer,
 	// alles wie beim Launch, mit der bestaetigten Aufloesung.
 	int32 MelSel = 5;                 // Cursor: 0..9 = 10..100 %, 10 = RESTART
-	int32 MelResPct = 60;             // bestaetigte Wahl, wirksam beim RESTART
+	int32 MelResPct = 100;            // bestaetigte Wahl, wirksam beim RESTART
 	int32 RestartSeq = 0;             // Cluster-Zaehler: jeder Sprung = ein Neuladen auf jedem Node
 	int32 RestartSeen = 0;
 	void RestartShow();

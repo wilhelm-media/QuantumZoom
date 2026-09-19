@@ -1,0 +1,63 @@
+QUANTUMZOOM - DESKTOP-FASSUNG (nur Wall)
+========================================
+
+Was das ist
+-----------
+Dasselbe Stueck wie im Deep Space, nur ohne Cluster: ein Bild statt Wand und
+Boden. Es gibt dafuer keinen eigenen Modus und keinen zweiten Build. Ohne eine
+nDisplay-Konfiguration meldet der Kamera-Pawn "kein Cluster", uebernimmt die
+Kamera selbst, und die Titelkarte zeigt ihre Wall-Fassung. Mehr passiert nicht.
+
+
+Starten
+-------
+Doppelklick auf   QZ-Desktop-Wall.bat
+
+Das Stueck startet im Titel. Der Unreal-Editor muss NICHT laufen.
+
+Vollbild statt Fenster:
+   In der .bat die Zeile
+       -windowed -resx=2560 -resy=1440 ^
+   ersetzen durch
+       -fullscreen ^
+
+Beenden: Alt+F4.
+
+
+Bedienung
+---------
+Y          blaettert durch die Bedienseiten:
+           sauber -> MELINDA -> HUD -> PERF -> MEMBRAN -> PARTIKEL
+D-Pad      waehlt eine Zeile
+A          bestaetigt / naechster Wert
+B          zurueck / kleinerer Wert
+Trigger    Zoom vor und zurueck
+R-Stick    umsehen
+
+MELINDA ist die erste Seite und die wichtigste vor einer Probe:
+   QUANTUM ZOOM RESOLUTION   10 bis 100 Prozent, Standard 60
+   RESTART                   laedt neu und startet wieder im Titel
+
+Die gewaehlte Aufloesung wird gespeichert und gilt auch beim naechsten Start.
+Sie regelt die interne Renderaufloesung; die Fenstergroesse steht in der .bat.
+
+
+Wenn es ruckelt
+---------------
+1. MELINDA oeffnen, Aufloesung auf 40 oder 30 Prozent, mit A bestaetigen,
+   dann RESTART. Das ist der groesste Hebel: Pixel kosten quadratisch.
+2. Reicht das nicht, auf der PERF-Seite einzelne Stationen stummschalten und
+   zusehen, welche die Bildrate zurueckbringt. Die Seite ist genau dafuer da.
+
+
+Wo das laeuft
+-------------
+Diese Fassung liest den Projektordner und die Engine-Installation von der
+Workstation. Sie laeuft dort, wo beides liegt. Fuer einen fremden Rechner
+braucht es das gekochte Paket - das ist ein eigener Ordner mit rund 3 GB, in
+dem alles enthalten ist, was die Anwendung braucht.
+
+
+Stand
+-----
+Build vom 8. September 2026, Commit bd138ac auf QuantumZoom_dev.

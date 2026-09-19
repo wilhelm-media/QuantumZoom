@@ -2248,7 +2248,7 @@ void AQZoomStagePawn::UpdateQuarkTriad(float Dt)
 		if (Len < 1.f) continue;
 
 		// MESSZEILE STRAENGE, eine Sekunde Abstand, alle drei im selben Frame.
-		if (LightDiagFrame == GFrameCounter)
+		if (HUDMode == 2 && LightDiagFrame == GFrameCounter)
 			UE_LOG(LogTemp, Warning,
 				TEXT("[QZoomTriad] e=%d quark=%s pos=(%.0f %.0f %.0f) J=(%.0f %.0f %.0f) len=%.0f ")
 				TEXT("beam=%s hidden=%d scaleZ=%.2f"),
@@ -2840,9 +2840,14 @@ void AQZoomStagePawn::SetStationFade(AActor* A, float Fade, float GateMul)
 						TEXT("[QZoomStage] Niagara-Bounds '%s': lokal +/-%.0f (= %.1f uu in der Welt)"),
 						*A->GetName(), Hf, Hf * CS);
 				}
+			// NUR AUF DER PERF-SEITE. Die vier Messzeilen sind Werkzeuge aus der Fehlersuche,
+			// nicht Betriebsprotokoll: im ausgelieferten Lauf schrieben sie fuenf Zeilen pro
+			// Sekunde in ein Log, das niemand liest. Sie bleiben vollstaendig erhalten und
+			// melden sich, sobald PERF offen ist (Y bis zur Messseite) - genau dann, wenn
+			// jemand misst.
 			// ZUSTAND JEDE SEKUNDE, nur fuer getaggte Filler. Ein Verdacht ohne
 			// Messung hat in diesem Projekt schon zu oft in die Irre gefuehrt.
-			if (A->Tags.Contains(TAG_NBOUNDS))
+			if (HUDMode == 2 && A->Tags.Contains(TAG_NBOUNDS))
 			{
 				const double Now = FPlatformTime::Seconds();
 				double& Last = NiagaraDiagLast.FindOrAdd(NC);
@@ -3469,7 +3474,7 @@ void AQZoomStagePawn::UpdateLights()
 			if (A->Tags.Contains(FName(TEXT("QZLight7"))))
 			{
 				const double NowS = FPlatformTime::Seconds();
-				if (LightDiagFrame != GFrameCounter && NowS - LightDiagLast > 1.0)
+				if (HUDMode == 2 && LightDiagFrame != GFrameCounter && NowS - LightDiagLast > 1.0)
 				{
 					LightDiagLast = NowS;
 					LightDiagFrame = GFrameCounter;
@@ -4957,7 +4962,7 @@ void AQZoomStagePawn::UpdateReadout()
 				ResPct,
 				// "<<<" heisst ABWEICHUNG VOM SHOW-DEFAULT (Stufe 2 = 60 %),
 				// nicht mehr "unter 100 %" - das staende sonst dauerhaft da.
-				(ResPct != 60) ? TEXT("  <<<") : TEXT(""));
+				(ResPct != 100) ? TEXT("  <<<") : TEXT(""));
 			Menu += FString::Printf(TEXT("\n%s [M] MET169          %s"),
 				(MuteSel == NRows + 4) ? TEXT(">") : TEXT("  "),
 				M169VariantIdx ? TEXT("HUELLE  <<<") : TEXT("W1"));
