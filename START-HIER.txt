@@ -1,6 +1,11 @@
 QUANTUMZOOM - DESKTOP-FASSUNG (nur Wall)
 ========================================
 
+Eine lauffaehige Demo von Quantum Zoom fuer einen einzelnen Rechner, bedient
+mit einem Xbox-kompatiblen Gamepad (XInput). Tastatur geht auch - die
+wichtigsten Tasten stehen weiter unten, alle in QuantumZoom-Controller.pdf.
+
+
 Was das ist
 -----------
 Dasselbe Stueck wie im Deep Space, nur ohne Cluster: ein Bild statt Wand und

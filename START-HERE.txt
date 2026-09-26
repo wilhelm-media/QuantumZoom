@@ -1,6 +1,11 @@
 QUANTUMZOOM - DESKTOP BUILD (wall only)
 =======================================
 
+A working demo of Quantum Zoom for a single machine, operated with an
+Xbox-compatible gamepad (XInput). A keyboard works as well - the important
+keys are listed below, all of them in QuantumZoom-Controller-EN.pdf.
+
+
 What this is
 ------------
 The same piece as in Deep Space, without the cluster: one picture instead of
